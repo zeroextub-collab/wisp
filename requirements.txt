@@ -1,4 +1,11 @@
 torch>=2.3.0
+# numpy is required, not optional: the converter serializes quantized
+# expert tensors to raw bytes via .numpy().tobytes(). torch itself
+# treats numpy as optional, so a torch-only environment raises
+# "RuntimeError: Numpy is not available" mid-conversion. The pure-torch
+# alternative (bytes(untyped_storage())) measured ~19s per 10MB, which
+# is unusable for 256 x ~99MB experts.
+numpy>=1.24
 tokenizers>=0.19.0
 huggingface_hub>=0.23.0
 safetensors>=0.4.0
