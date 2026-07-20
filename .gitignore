@@ -1,0 +1,45 @@
+# Build artifacts
+build-ninja/
+build/
+dist/
+*.egg-info/
+
+# Compiled C extension (built per-machine by pip install -e .)
+wisp/_wisp_core*.pyd
+wisp/_wisp_core*.so
+wisp/_wisp_core*.dll
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Logs
+*.log
+vram_peak.log
+fast_test.log
+validation_run.log
+
+# Model weights (never commit)
+models/
+_hf_*/
+*.bin
+*.safetensors
+*.gguf
+
+# Download state
+download_state.json
+download_state_*.json
+
+# WISP cache
+.wisp/
+wisp_sim_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

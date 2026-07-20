@@ -1,0 +1,16 @@
+# WISP build system.
+#
+# Declares the isolated-build requirements so `pip install -e .` works
+# out of the box (PEP 517 builds run in a clean env that would otherwise
+# lack pybind11/cmake/ninja). Package metadata stays in setup.py because
+# the CMake extension build needs its imperative hooks.
+
+[build-system]
+requires = [
+    "setuptools>=64",
+    "wheel",
+    "pybind11>=2.11",
+    "cmake>=3.20",
+    "ninja; platform_system != 'Windows'",
+]
+build-backend = "setuptools.build_meta"

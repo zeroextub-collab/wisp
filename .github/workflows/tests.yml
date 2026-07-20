@@ -1,0 +1,30 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      WISP_NO_CUDA: "1"          # CI runners have no GPU — CPU-only engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install CPU torch (small wheel, no CUDA)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install build dependencies
+        run: pip install pybind11 cmake ninja
+
+      - name: Install WISP (builds the CPU-only C engine)
+        run: pip install -e ".[dev]" --no-build-isolation
+
+      - name: Run tests
+        run: pytest tests/ -v --ignore=tests/test_cuda.py
+        # CUDA-only tests are skipped automatically (importorskip) when
+        # the engine reports cuda_enabled=False; the LRU / double-buffer
+        # C self-tests still run against the CPU build.
