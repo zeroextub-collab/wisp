@@ -23,18 +23,47 @@ jobs:
       - name: Install WISP (attempts the CPU-only C engine build)
         run: pip install -e ".[dev]" --no-build-isolation
 
+      # Environment fingerprint — makes dependency/import problems
+      # diagnosable from the log without guesswork.
+      - name: Environment report
+        run: |
+          python -V
+          pip list
+          python -c "import wisp; print('wisp', wisp.__version__)"
+          python -c "
+          try:
+              import wisp._wisp_core as c
+              print('C engine: OK, cuda_enabled =', c.cuda_enabled)
+          except BaseException as e:
+              print('C engine: UNAVAILABLE ->', type(e).__name__, e)
+          "
+          pytest tests/ --collect-only -q | tail -5
+
       # The portable suite: everything that does not touch the compiled
       # extension. Engine tests carry the `engine` marker and are
       # deselected here, so this step is deterministic on any runner
       # whether or not the C extension built or loads.
+      # On failure the key error lines are re-emitted as annotations so
+      # they are visible without downloading the full log.
       - name: Run tests (Python suite)
-        run: pytest tests/ -v -m "not engine"
+        run: |
+          set +e
+          pytest tests/ -v -m "not engine" 2>&1 | tee /tmp/pytest.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -ne 0 ]; then
+            grep -E "^E |ImportError|ModuleNotFoundError|^ERROR|^FAILED|error:" /tmp/pytest.txt \
+              | head -8 | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::pytest exited $code"
+            exit "$code"
+          fi
 
       # The C engine's own self-tests (LRU, double-buffer, and the
       # packer -> C-reader -> dequant byte-layout cross-check). These
       # only run when the extension actually imports; they are reported
       # but non-blocking, so a runner that cannot build the extension
-      # never turns the badge red while still surfacing real C bugs.
+      # never turns the badge red while real C regressions stay visible.
       - name: Run tests (C engine self-tests, non-blocking)
+        if: always()
         continue-on-error: true
         run: pytest tests/ -v -m engine -rs
