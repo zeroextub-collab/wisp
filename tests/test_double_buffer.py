@@ -11,21 +11,27 @@ The C self-test exercises the full contract:
 
 import pytest
 
+# Optional compiled engine — see the note in tests/test_adapters.py.
+try:
+    import wisp._wisp_core as _core
+    HAS_ENGINE = True
+except (ImportError, OSError):
+    _core = None
+    HAS_ENGINE = False
 
-def _core():
-    return pytest.importorskip(
-        "wisp._wisp_core", exc_type=ImportError,
-        reason="C engine unavailable (not built, or blocked by an OS "
-               "application-control policy) — run `pip install -e .`")
+requires_engine = pytest.mark.skipif(
+    not HAS_ENGINE, reason="C engine not available in CI")
 
 
+@pytest.mark.engine
+@requires_engine
 def test_double_buffer_selftest():
-    core = _core()
-    assert core._selftest_double_buffer() is True
+    assert _core._selftest_double_buffer() is True
 
 
+@pytest.mark.engine
+@requires_engine
 def test_double_buffer_selftest_is_repeatable():
     """Init/destroy cycles must not leak or corrupt state."""
-    core = _core()
     for _ in range(5):
-        assert core._selftest_double_buffer() is True
+        assert _core._selftest_double_buffer() is True

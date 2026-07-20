@@ -8,6 +8,14 @@ import pytest
 
 from wisp.runtime.tier_cache import PyLRU
 
+# Optional compiled engine — see the note in tests/test_adapters.py.
+try:
+    import wisp._wisp_core as _core
+    HAS_ENGINE = True
+except (ImportError, OSError):
+    _core = None
+    HAS_ENGINE = False
+
 
 # --------------------------------------------------------------------------
 # PyLRU (mirrors the C semantics)
@@ -73,9 +81,8 @@ def test_negative_capacity_raises():
 # C implementation (O(1) hash + doubly-linked list) via its self-test
 # --------------------------------------------------------------------------
 
+@pytest.mark.engine
+@pytest.mark.skipif(not HAS_ENGINE,
+                    reason="C engine not available in CI")
 def test_c_lru_selftest():
-    core = pytest.importorskip(
-        "wisp._wisp_core", exc_type=ImportError,
-        reason="C engine unavailable (not built, or blocked by an OS "
-               "application-control policy) — run `pip install -e .`")
-    assert core._selftest_lru() is True
+    assert _core._selftest_lru() is True

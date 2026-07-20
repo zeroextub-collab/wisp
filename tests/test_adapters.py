@@ -16,6 +16,17 @@ from wisp.converter.quantizer import (dequantize_int4, quantization_error,
 from wisp.models.registry import (adapter_from_model_dir, get_adapter,
                                   supported_models)
 
+# The compiled C engine is optional: it is absent in CI (and on any
+# machine that hasn't run `pip install -e .`), and on Windows it can be
+# present-but-unloadable when an OS application-control policy blocks
+# unsigned DLLs — that surfaces as OSError, not ImportError.
+try:
+    import wisp._wisp_core as _core
+    HAS_ENGINE = True
+except (ImportError, OSError):
+    _core = None
+    HAS_ENGINE = False
+
 
 # --------------------------------------------------------------------------
 # The critical math — get this wrong and every estimate is wrong
@@ -263,16 +274,16 @@ def test_expert_file_layout(tmp_path):
     assert off == len(blob)
 
 
+@pytest.mark.engine
+@pytest.mark.skipif(not HAS_ENGINE,
+                    reason="C engine not available in CI")
 def test_c_engine_reads_python_packed_expert(tmp_path):
     """
     The three-way byte-layout contract: Python packer -> C header parser
     -> C int4 dequant must agree bit-for-bit with the Python dequantizer.
     Exercises the REAL C engine code via the _debug_expert_probe binding.
     """
-    core = pytest.importorskip(
-        "wisp._wisp_core", exc_type=ImportError,
-        reason="C engine unavailable (not built, or blocked by an OS "
-               "application-control policy) — run `pip install -e .`")
+    core = _core
 
     torch.manual_seed(7)
     hidden, inter, gs = 32, 16, 16
