@@ -1,7 +1,8 @@
-# Build artifacts
-build-ninja/
-build/
-dist/
+# Build artifacts (root-anchored: never match source dirs of the same
+# name nested inside the package)
+/build-ninja/
+/build/
+/dist/
 *.egg-info/
 
 # Compiled C extension (built per-machine by pip install -e .)
@@ -17,12 +18,11 @@ __pycache__/
 
 # Logs
 *.log
-vram_peak.log
-fast_test.log
-validation_run.log
 
-# Model weights (never commit)
-models/
+# Model weights — ROOT-ANCHORED ON PURPOSE.
+# An unanchored `models/` also matches wisp/models/, which is SOURCE
+# (the model adapters) and silently broke the first published commit.
+/models/
 _hf_*/
 *.bin
 *.safetensors
