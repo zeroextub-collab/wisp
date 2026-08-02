@@ -20,10 +20,14 @@ def test_version(runner):
 def test_info_by_model_name_kimi_k3(runner):
     result = runner.invoke(main, ["info", "--model", "kimi-k3"])
     assert result.exit_code == 0, result.output
-    assert "WEIGHTS DROP JULY 27" in result.output
-    assert "896" in result.output              # experts/layer (confirmed)
-    assert "1,504" in result.output            # lookups/token
-    assert "KDA hybrid linear" in result.output
+    # Confirmed architecture (arXiv:2607.24653) shown without hedging
+    assert "104B active" in result.output
+    assert "896" in result.output              # experts/layer
+    assert "1,488" in result.output            # lookups/token = 16 x 93
+    assert "56x expert-level" in result.output  # 896 / 16
+    assert "KDA" in result.output and "GatedMLA" in result.output
+    # ...but the missing kernel must still be stated plainly
+    assert "no KDA kernel yet" in result.output
 
 
 def test_info_by_model_name_glm(runner):

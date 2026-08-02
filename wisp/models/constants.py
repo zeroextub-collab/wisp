@@ -13,9 +13,8 @@ CRITICAL MATH (used everywhere — do not "simplify"):
     GLM-5.2:     8 x 61 = 488 lookups -> 18,350,080 x 488 = ~8.54 GB/token
     DeepSeek-V3: 8 x 58 = 464 lookups
     DeepSeek-R1: 8 x 58 = 464 lookups
-    Kimi K3:     16 x 94 = 1,504 lookups (top-16 CONFIRMED by Moonshot,
-                 July 2026; layer count estimated until the technical
-                 report drops July 27)
+    Kimi K3:     16 x 93 = 1,488 lookups (CONFIRMED — technical report
+                 arXiv:2607.24653; 93 layers = 69 KDA + 24 Gated MLA)
 """
 
 from __future__ import annotations
@@ -35,7 +34,12 @@ EXPERT_SIZE_INT4: dict[str, int] = {
     "glm52":       18_350_080,  # 17.5 MB — measured by Colibrì community
     "deepseek_v3": 17_825_792,  # ~17.0 MB — estimated (similar arch to GLM)
     "deepseek_r1": 17_825_792,  # Same as V3
-    "kimi_k3":     22_020_096,  # ~21.0 MB — estimated (larger hidden dim)
+    # K3 hidden is CONFIRMED 7168 — identical to GLM-5.2 — so a GLM-sized
+    # expert is the best-grounded estimate (the old 21MB figure assumed a
+    # larger 8192 hidden). Cross-check: 83,328 experts x 18.35MB = ~1.4 TB,
+    # which matches Moonshot's published int4 footprint. Still ESTIMATED:
+    # the routed-expert intermediate size is not in the report.
+    "kimi_k3":     18_350_080,  # ~17.5 MB — derived, see note above
     "mixtral_8x7b":  99_090_552,   # MEASURED from real conversion 2026-07-19
                                    # (176.2M params x 0.5625 B/param + header)
     "mixtral_8x22b": 169_869_552,  # computed: 302.0M params x 0.5625 + header
@@ -58,7 +62,10 @@ NUM_LAYERS: dict[str, int] = {
     "glm52":       61,
     "deepseek_v3": 58,
     "deepseek_r1": 58,
-    "kimi_k3":     94,   # ESTIMATED — update when tech report drops July 27
+    # CONFIRMED — arXiv:2607.24653: 69 KDA + 24 Gated MLA = 93.
+    # (23 blocks of [3 KDA + 1 MLA] + 1 final MLA, so the last layer is
+    # always global attention.) Our pre-report estimate of 94 was off by 1.
+    "kimi_k3":     93,
     "mixtral_8x7b":  32,
     "mixtral_8x22b": 56,
 }
@@ -85,7 +92,7 @@ NUM_SHARED_EXPERTS: dict[str, int] = {
     "glm52":       2,
     "deepseek_v3": 1,
     "deepseek_r1": 1,
-    "kimi_k3":     1,   # Estimated
+    "kimi_k3":     2,   # CONFIRMED — arXiv:2607.24653 (was estimated 1)
     "mixtral_8x7b":  0,   # pure routed MoE — no shared experts
     "mixtral_8x22b": 0,
 }
@@ -103,7 +110,7 @@ HIDDEN_SIZE: dict[str, int] = {
     "glm52":       7168,
     "deepseek_v3": 7168,
     "deepseek_r1": 7168,
-    "kimi_k3":     8192,  # Estimated
+    "kimi_k3":     7168,  # CONFIRMED — arXiv:2607.24653 (was estimated 8192)
     "mixtral_8x7b":  4096,
     "mixtral_8x22b": 6144,
 }
@@ -129,11 +136,46 @@ ATTENTION_TYPE: dict[str, str] = {
     "mixtral_8x22b": "GQA",   # 48 query heads / 8 KV heads
 }
 
+# Parameters actually activated per token (dense path + routed experts).
+# This is the headline "feels like an NB model" number; WISP's own math
+# never uses it — streaming cost is expert_size x top_k x num_layers.
+ACTIVE_PARAMETERS: dict[str, int] = {
+    "glm52":         40_000_000_000,
+    "deepseek_v3":   37_000_000_000,
+    "deepseek_r1":   37_000_000_000,
+    "kimi_k3":      104_000_000_000,  # CONFIRMED — arXiv:2607.24653 (104.2B)
+    "mixtral_8x7b":  13_000_000_000,
+    "mixtral_8x22b": 39_000_000_000,
+}
+
+# Layer-level attention layout. Uniform families just repeat one kind of
+# attention; Kimi K3 is the first hybrid WISP supports.
+ATTENTION_PATTERN: dict[str, str] = {
+    "glm52":         "uniform MLA",
+    "deepseek_v3":   "uniform MLA",
+    "deepseek_r1":   "uniform MLA",
+    # CONFIRMED — arXiv:2607.24653. 23 blocks of [3x KDA + 1x Gated MLA],
+    # plus one final Gated MLA so the last layer is always global:
+    # 69 KDA (74%) + 24 Gated MLA (26%) = 93 layers.
+    "kimi_k3":       "3x KDA + 1x GatedMLA repeating (69 KDA / 24 MLA)",
+    "mixtral_8x7b":  "uniform GQA",
+    "mixtral_8x22b": "uniform GQA",
+}
+
+# Expert-level sparsity = experts_per_layer / top_k. NOTE this is a
+# different ratio from total/active parameters: K3 is 896/16 = 56x sparse
+# at the expert level, but only 2.8T/104B = 27x at the parameter level,
+# because the dense path (attention, embeddings, shared experts) runs for
+# every token. Both figures are correct; they measure different things.
+def expert_sparsity(family: str) -> int:
+    return NUM_EXPERTS_PER_LAYER[family] // TOP_K_ROUTING[family]
+
+
 MAX_POSITION_EMBEDDINGS: dict[str, int] = {
     "glm52":       1_048_576,
     "deepseek_v3":   163_840,
     "deepseek_r1":   163_840,
-    "kimi_k3":     1_000_000,  # CONFIRMED — 1M-token context window
+    "kimi_k3":     1_048_576,  # CONFIRMED — 1M-token context (2^20 exactly)
     "mixtral_8x7b":     32_768,
     "mixtral_8x22b":    65_536,
 }
@@ -200,7 +242,9 @@ DISK_SIZE_INT4: dict[str, int] = {
     "glm52":       370 * GB,
     "deepseek_v3": 340 * GB,
     "deepseek_r1": 340 * GB,
-    "kimi_k3":    1400 * GB,   # ~1.4 TB estimated
+    # 93 layers x 896 experts = 83,328 experts x ~17.5MB = ~1.39 TiB,
+    # plus the dense path. Matches Moonshot's published int4 footprint.
+    "kimi_k3":    1440 * GB,   # ~1.4 TB
     "mixtral_8x7b":   27 * GB,   # MEASURED 26.6 GB (3.2 dense + 25.4 experts)
     "mixtral_8x22b":  90 * GB,   # computed: 76 GB experts + 10.7 GB dense
 }

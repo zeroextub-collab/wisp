@@ -22,6 +22,8 @@ from pathlib import Path
 import torch
 from tokenizers import Tokenizer as HFTokenizer
 
+from . import constants as _C
+
 
 class ModelAdapter(ABC):
     """
@@ -102,6 +104,27 @@ class ModelAdapter(ABC):
     @property
     @abstractmethod
     def vocab_size(self) -> int: ...
+
+    @property
+    def active_parameters_per_token(self) -> int:
+        """Parameters activated per token (dense path + routed experts).
+        The headline sparsity number; 0 when the family hasn't published
+        one. WISP's streaming math never uses it — see
+        bytes_per_cold_token for what actually costs time."""
+        return _C.ACTIVE_PARAMETERS.get(self.family, 0)
+
+    @property
+    def attention_pattern(self) -> str:
+        """How attention layers are laid out. Uniform families report a
+        single mechanism; hybrids (Kimi K3) describe the interleave."""
+        return _C.ATTENTION_PATTERN.get(
+            self.family, f"uniform {self.attention_type}")
+
+    @property
+    def expert_sparsity(self) -> int:
+        """experts_per_layer / top_k — how much of each layer's expert
+        pool a token skips. Distinct from total/active parameters."""
+        return self.num_experts_per_layer // max(self.top_k_routing, 1)
 
     @property
     def bytes_per_cold_token(self) -> int:

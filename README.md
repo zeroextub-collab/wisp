@@ -2,7 +2,7 @@
 
 > Stream what shouldn't run.
 
-[![Tests](https://img.shields.io/badge/tests-73%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-76%20passing-brightgreen)]()
 [![CUDA](https://img.shields.io/badge/CUDA-12.0%2B%20%7C%2013.x-76b900)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
@@ -12,7 +12,7 @@ WISP runs the largest open-source AI models ever built
 on the hardware sitting on your desk.
 
 A 744B parameter frontier model. A 671B reasoning engine.
-A 2.8 trillion parameter behemoth dropping July 27.
+A 2.8 trillion parameter behemoth, weights already public.
 
 Not a slow demo. Not quantized to uselessness.
 The full model, at full frontier intelligence,
@@ -30,7 +30,7 @@ and your NVMe SSD in real time.
 | DeepSeek-R1 | 671B | 37B | 464 | ~340 GB | ✅ Ready |
 | Mixtral-8x7B | 47B | 13B | 64 | 26.6 GB* | ✅ **Verified end-to-end** |
 | Mixtral-8x22B | 141B | 39B | 112 | ~90 GB | ✅ Ready |
-| Kimi K3 | 2.8T | ~50B | ~1,504 | ~1.4 TB | ⏳ July 27 |
+| Kimi K3 | 2.8T | 104B | 1,488 | ~1.4 TB | ⏳ KDA in progress |
 | Qwen3.8 | 2.4T | TBD | TBD | ~1.2TB est. | ⏳ Weights soon |
 
 *Measured from a real conversion — every expert file verified.
@@ -54,7 +54,7 @@ real tokens through the full C + CUDA engine on consumer hardware.
 
 Every MoE (Mixture-of-Experts) model activates only
 a small fraction of its parameters for each token.
-GLM-5.2 activates ~5.4%. Kimi K3 activates ~1.8%.
+GLM-5.2 activates ~5.4%. Kimi K3 activates 3.7% (104B of 2.8T).
 WISP exploits this with a self-organizing 3-tier cache:
 
 ```
@@ -129,7 +129,7 @@ Override anytime with `--display-mode gpu|igpu|auto`.
 | Mixtral-8x7B | **0.75 tok/s** ✅ measured | est. 2-5 tok/s* | est. 5-10 tok/s* | est. ~2x* |
 | GLM-5.2 | est. 0.7 tok/s* | est. 5.5 tok/s* | est. 8.5 tok/s* | est. ~14 tok/s* |
 | DeepSeek-V3/R1 | est. 0.8 tok/s* | est. 5.8 tok/s* | est. 9.0 tok/s* | est. ~14.5 tok/s* |
-| Kimi K3 | est. 0.3 tok/s* | est. 3 tok/s* | est. 6 tok/s* | est. ~10 tok/s* |
+| Kimi K3 | est. 0.2 tok/s* | est. 3 tok/s* | est. 6 tok/s* | est. ~10 tok/s* |
 
 *Cold = empty cache, first run. Warm = 15 min same domain.
 Hot = repeated patterns, cache fully warmed.
@@ -327,7 +327,7 @@ WISP just delivers them as fast as possible.
 
 Three layers, one job each: **Python** orchestrates (download,
 convert, configure — things that run once), **C** owns the hot
-path (64-1,504 expert fetches per token, cache coordination,
+path (64-1,488 expert fetches per token, cache coordination,
 prefetch threads), **CUDA** owns the math (absorbed MLA / GQA
 attention, int4 dequant, fused SwiGLU FFN, router top-K).
 The engine is model-agnostic: adapters map every family onto
@@ -343,9 +343,14 @@ one canonical weight layout at conversion time.
 - Warm/hot steady-state Mixtral numbers (long runs)
 - Any community-reported bugs
 
-### v1.1 — July 27 (Kimi K3 Day)
+### v1.1 — Kimi K3
+Architecture is confirmed (technical report arXiv:2607.24653):
+93 layers = 69 KDA + 24 Gated MLA in a 3:1 interleave, 896 experts
+per layer, top-16, 104B active. The 24 Gated MLA layers map onto
+WISP's existing absorbed-MLA path; the 69 KDA layers need a new
+linear-attention kernel.
 - Kimi K3 (2.8T) full support:
-  KDA attention + Quantile Balancing router
+  KDA linear attention + Stable LatentMoE routing
 - Qwen3-235B adapter
 - Qwen3.8 adapter (open weights expected soon,
   architecture TBD — ready to implement the day
@@ -390,7 +395,9 @@ JustVugg showed us what was possible.
 - Leviathan et al. 2023 — Speculative Decoding
 - GLM team — GLM-5.2 and IndexShare MoE architecture
 - DeepSeek team — DeepSeek-V3/R1 MoE + Multi-head Latent Attention
-- Moonshot AI — Kimi K3, KDA attention, Stable LatentMoE
+- Moonshot AI — *Kimi K3: Open Frontier Intelligence*
+  ([arXiv:2607.24653](https://arxiv.org/abs/2607.24653)) — KDA hybrid
+  linear attention, Stable LatentMoE routing
 - The llama.cpp community — proof that consumer hardware
   deserves frontier models
 

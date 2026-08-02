@@ -70,17 +70,26 @@ def print_startup_display(profile: SystemProfile, adapter,
     click.echo(f"    CPU   : {profile.cpu_name} — {profile.cpu_threads} threads")
     click.echo("")
     if adapter.family == "kimi_k3":
-        # Architecture confirmed (896 experts, top-16, KDA); layer count
-        # and weights land with the July 27 technical report.
-        click.echo("  Model : Kimi K3 (2.8T, int4) [WEIGHTS DROP JULY 27]")
-        click.echo(f"    Layers      : {adapter.num_layers} (est)  |  "
-                   f"Experts/layer: {adapter.num_experts_per_layer} "
-                   f"(confirmed)")
-        click.echo(f"    Top-K       : {adapter.top_k_routing} (confirmed)  |  "
-                   f"Lookups/token: "
-                   f"{adapter.total_expert_lookups_per_token:,} (est)")
-        click.echo("    Attention   : KDA hybrid linear "
-                   "(GQA placeholder until July 27)")
+        # Architecture CONFIRMED by the technical report (arXiv:2607.24653).
+        # What is still missing is WISP's KDA kernel, not the numbers.
+        active_b = adapter.active_parameters_per_token // 1_000_000_000
+        click.echo("  Model : Kimi K3 (2.8T total / "
+                   f"{active_b}B active, int4)")
+        click.echo(f"    Layers      : {adapter.num_layers}  |  "
+                   f"Experts/layer: {adapter.num_experts_per_layer}  |  "
+                   f"Top-K: {adapter.top_k_routing}")
+        click.echo(f"    Lookups/token: "
+                   f"{adapter.total_expert_lookups_per_token:,}  |  "
+                   f"Sparsity: {adapter.expert_sparsity}x expert-level")
+        click.echo(f"    Attention   : {adapter.attention_pattern}")
+        click.echo("                  75% KDA / 25% Gated MLA "
+                   "(confirmed arXiv:2607.24653)")
+        click.echo(click.style(
+            "    NOTE: WISP has no KDA kernel yet — K3 layers currently "
+            "run the GQA", fg="yellow"))
+        click.echo(click.style(
+            "          placeholder and will NOT produce correct output.",
+            fg="yellow"))
     else:
         click.echo(f"  Model : {adapter.name} "
                    f"({adapter.total_parameters // 1_000_000_000}B, int4)")
@@ -510,17 +519,30 @@ def info(model_ref: str, display_mode: str):
     config = AutoConfig().calculate(p, adapter)
     print_startup_display(p, adapter, config)
 
-    # When the display eats VRAM, show what moving it would unlock.
+    # When the display eats VRAM, show what moving it would unlock — but
+    # ONLY if it actually would. The 75% safety cap is often the stricter
+    # constraint (e.g. a 12GB card: 75% = 9.0GB vs 12 - 2.0 display/base
+    # = 10.1GB), in which case re-cabling the monitor buys nothing and
+    # advertising a gain would be a lie.
     if p.gpu_count > 0 and getattr(p, "display_on_gpu", False):
         alt = copy.deepcopy(p)
         apply_display_mode(alt, "igpu")
         alt_cfg = AutoConfig().calculate(alt, adapter)
+        gain = alt_cfg.vram_expert_count - config.vram_expert_count
         click.echo("")
-        click.echo("  Switch to iGPU/motherboard display for:")
-        click.echo(f"    GPU VRAM  : {alt_cfg.vram_expert_count:,} expert "
-                   f"slots (+{alt_cfg.vram_expert_count - config.vram_expert_count})")
-        click.echo(f"    System RAM: {alt_cfg.ram_expert_count:,} expert slots")
-        click.echo(f"    NVMe SSD  : {alt_cfg.ssd_expert_count:,} cold experts")
+        if gain > 0:
+            click.echo("  Switch to iGPU/motherboard display for:")
+            click.echo(f"    GPU VRAM  : {alt_cfg.vram_expert_count:,} "
+                       f"expert slots (+{gain})")
+            click.echo(f"    System RAM: {alt_cfg.ram_expert_count:,} "
+                       f"expert slots")
+            click.echo(f"    NVMe SSD  : {alt_cfg.ssd_expert_count:,} "
+                       f"cold experts")
+        else:
+            click.echo("  Moving the display to an iGPU port would not "
+                       "add expert slots here —")
+            click.echo("  the 75% VRAM safety cap binds before the "
+                       "display reserve does.")
 
 
 # --------------------------------------------------------------------------- #

@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from wisp.models import constants as C
 from wisp.models.registry import get_adapter
 from wisp.system.auto_config import AutoConfig, pick_gpu_strategy
 from wisp.system.profiler import GPUProfile, SystemProfile, SystemProfiler
@@ -168,8 +169,21 @@ def test_auto_buffer_calculation():
     auto_cfg = AutoConfig().calculate(profile, adapter)
     igpu_profile = apply_display_mode(copy.deepcopy(profile), "igpu")
     igpu_cfg = AutoConfig().calculate(igpu_profile, adapter)
+
+    # Freeing the display reserve can never COST slots.
+    assert igpu_cfg.vram_expert_count >= auto_cfg.vram_expert_count
+
+    # It only ADDS slots when the display reserve is the binding
+    # constraint. The 75% safety cap is stricter on most cards — e.g.
+    # 12GB: cap 9.0GB vs 12 - 2.0 (display + base) = 10.1GB — so equality
+    # here is correct behaviour, not a regression.
     if profile.gpu_count > 0 and profile.display_on_gpu:
-        assert igpu_cfg.vram_expert_count > auto_cfg.vram_expert_count
+        vram = profile.gpus[profile.primary_gpu_index].vram_total_bytes
+        cap = int(vram * 0.75)
+        display_limited = vram - (C.VRAM_SAFETY_BUFFER
+                                  + profile.display_reserved_bytes)
+        if display_limited < cap:      # reserve binds -> real gain
+            assert igpu_cfg.vram_expert_count > auto_cfg.vram_expert_count
 
 
 def test_gpu_strategy_selection():

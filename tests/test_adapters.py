@@ -66,18 +66,52 @@ def test_adapter_identities():
 
 
 def test_kimi_k3_confirmed_architecture():
+    """All values CONFIRMED by the technical report, arXiv:2607.24653."""
     a = get_adapter("kimi-k3")
     assert a.name == "Kimi-K3"
     assert a.total_parameters == 2_800_000_000_000
-    assert a.num_experts_per_layer == 896          # CONFIRMED
-    assert a.top_k_routing == 16                   # CONFIRMED
-    assert a.num_layers == 94                      # estimated until July 27
-    assert a.total_expert_lookups_per_token == 1504   # 16 x 94
-    assert a.attention_type == "KDA"               # GQA placeholder in engine
+    assert a.active_parameters_per_token == 104_000_000_000
+    assert a.num_experts_per_layer == 896
+    assert a.top_k_routing == 16
+    assert a.num_shared_experts == 2
+    assert a.hidden_size == 7168
+    assert a.num_layers == 93                        # 69 KDA + 24 Gated MLA
+    assert a.total_expert_lookups_per_token == 1488  # 16 x 93
+    assert a.attention_type == "KDA"        # GQA placeholder in the engine
     assert a.has_native_mtp is False
     assert a.drafter_hf_id == "moonshotai/Kimi-K2"
     assert a.default_acceptance_rate == pytest.approx(0.42)
     assert a.get_drafter_config()["type"] == "same_family"
+
+
+def test_kimi_k3_hybrid_attention_layout():
+    """93 layers split 3:1 KDA:MLA, with a final global-attention layer."""
+    a = get_adapter("kimi-k3")
+    assert a.num_kda_layers == 69
+    assert a.num_mla_layers == 24
+    assert a.num_kda_layers + a.num_mla_layers == a.num_layers
+    # 23 blocks of [3 KDA + 1 MLA] = 92, plus one final MLA = 93
+    assert a.num_kda_layers // 3 == 23
+    assert a.num_mla_layers == a.num_kda_layers // 3 + 1
+    # ~75% KDA / ~25% Gated MLA
+    assert 0.73 < a.num_kda_layers / a.num_layers < 0.76
+    assert "KDA" in a.attention_pattern and "MLA" in a.attention_pattern
+
+
+def test_kimi_k3_two_sparsity_ratios_are_distinct():
+    """56x expert-level vs 27x parameter-level — both correct, different
+    things. Guards against someone 'fixing' one to match the other."""
+    a = get_adapter("kimi-k3")
+    assert a.expert_sparsity == 56                   # 896 / 16
+    param_sparsity = a.total_parameters / a.active_parameters_per_token
+    assert 26 < param_sparsity < 28                  # 2.8T / 104B
+    assert a.expert_sparsity != round(param_sparsity)
+
+
+def test_attention_pattern_defaults_for_uniform_families():
+    for name in ("glm-5.2", "deepseek-v3"):
+        assert get_adapter(name).attention_pattern == "uniform MLA"
+    assert get_adapter("mixtral-8x7b").attention_pattern == "uniform GQA"
 
 
 def test_mixtral_8x7b_complete():
