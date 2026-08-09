@@ -22,6 +22,7 @@ from ..speculative.sampler import SamplerConfig
 from ..system.auto_config import AutoConfig, TierConfig
 from ..system.profiler import SystemProfiler, SystemProfile
 from .generation import GenerationLoop, GenerationResult
+from .learning_cache import LearningCache
 from .tier_cache import TierCache
 
 _BUILD_HELP = (
@@ -97,13 +98,23 @@ class WispEngine:
         self._kv = self._core.kv_cache_alloc(self._handle, max_seq_len)
         self.max_seq_len = max_seq_len
 
+        # Cross-session learning: load what previous runs discovered,
+        # then pre-warm those experts before the first token.
+        self.learning_cache = LearningCache(self.model_path)
+        self.learned_records = self.learning_cache.load()
+        self.prewarmed_experts = 0
+
         self.tier_cache = TierCache(
             self._core, self._handle,
             num_layers=self.adapter.num_layers,
-            top_k=self.adapter.top_k_routing)
+            top_k=self.adapter.top_k_routing,
+            learning_cache=self.learning_cache)
         self._loop = GenerationLoop(
             self._core, self._handle, self.adapter,
             self.tier_cache, self._kv)
+
+        if self.learned_records:
+            self.prewarmed_experts = self._prewarm_from_learning_cache()
 
         self._drafter = None
         # CPU-only detection: either the extension was built WISP_NO_CUDA,
@@ -120,6 +131,35 @@ class WispEngine:
             use_speculative = False
         self.use_speculative = use_speculative
         self._closed = False
+
+    def _prewarm_from_learning_cache(self) -> int:
+        """
+        Queue the hottest experts from previous sessions for loading.
+
+        This reuses the engine's existing async prefetch worker rather
+        than a bespoke loader: hints go on the queue, the background
+        thread pulls the blobs off SSD into the RAM tier, and the first
+        real access promotes them to VRAM. Startup is not blocked — the
+        warm-up overlaps with tokenization and prompt prefill.
+        """
+        budget = (self.config.vram_expert_count
+                  + self.config.ram_expert_count)
+        if budget <= 0:
+            return 0
+        hot = self.learning_cache.get_hot_experts(top_n=budget)
+        if not hot:
+            return 0
+
+        by_layer: dict[int, list[int]] = {}
+        for layer, expert in hot:
+            by_layer.setdefault(layer, []).append(expert)
+        queued = 0
+        for layer, experts in by_layer.items():
+            if 0 <= layer < self.adapter.num_layers:
+                self._core.expert_prefetch_hint(self._handle, layer,
+                                                experts)
+                queued += len(experts)
+        return queued
 
     def _gpu_indices(self) -> list[int]:
         if self.config.gpu_strategy == "cpu_only":
@@ -259,9 +299,21 @@ class WispEngine:
         self._core.cache_clear(self._handle)
         self.tier_cache.clear()
 
+    def shutdown(self) -> None:
+        """Persist what this session learned, then release the engine.
+        Alias kept so server/CLI callers can express intent."""
+        self.close()
+
     def close(self) -> None:
         if self._closed:
             return
+        # Drain anything the engine logged since the last checkpoint so
+        # the final tokens of a session are not lost, then persist.
+        try:
+            self.tier_cache.drain_engine_log()
+            self.learning_cache.save()
+        except Exception:
+            pass   # never let bookkeeping block a clean shutdown
         self._core.kv_cache_free(self._handle, self._kv)
         self._core.engine_destroy(self._handle)
         self._closed = True

@@ -2,7 +2,7 @@
 
 > Stream what shouldn't run.
 
-[![Tests](https://img.shields.io/badge/tests-76%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-121%20passing-brightgreen)]()
 [![CUDA](https://img.shields.io/badge/CUDA-12.0%2B%20%7C%2013.x-76b900)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
@@ -82,6 +82,36 @@ compressed `c_kv` latent instead of expanded K,V tensors.
 Result: **~70KB per token** KV cache instead of ~5MB.
 This is what makes 1M-token context feasible in RAM.
 
+### KDA — Kimi Delta Attention
+
+Kimi K3 runs linear attention in 69 of its 93 layers. Instead of a KV
+cache that grows with the conversation, each head carries a fixed
+`[d_k, d_v]` state matrix updated by a delta rule:
+
+```
+beta_t = sigmoid(W_beta x_t)          per-channel decay
+S_t    = S_{t-1} * (1 - beta_t k_t) + v_t k_t^T
+o_t    = S_t q_t                      output, then a SiLU gate
+```
+
+The decay term is what makes it a *delta* rule: the state is reduced by
+exactly the amount the incoming key addresses before the new value is
+written, so it corrects rather than accumulates. Plain linear attention
+(`S += v k^T`) saturates over long contexts; this does not. Cost is
+O(n) in sequence length and **memory is constant** — that is the
+property that makes 1M-token context tractable at all.
+
+WISP implements KDA as a CUDA kernel with a matching pure-PyTorch
+fallback for CPU-only mode; tests assert the two agree numerically, that
+prefill lands on the same state as sequential decode, and that the state
+size is unchanged after 1,000 tokens. The other 24 K3 layers are Gated
+MLA and already run through WISP's absorbed-MLA path.
+
+**Status:** the kernel and layer are complete and tested. Running K3
+end-to-end additionally needs KDA projection weights in the converted
+model (the converter does not map them yet) and a branch in the C
+forward pass — that is what "KDA in progress" means in the table above.
+
 ### Double-Buffer Async Pipeline
 
 While the GPU computes token N (2-8ms),
@@ -106,6 +136,65 @@ motherboard (via the driver itself) and reserves VRAM
 accordingly. Move the monitor to the motherboard port →
 WISP auto-detects → full VRAM dedicated to inference.
 Override anytime with `--display-mode gpu|igpu|auto`.
+
+### Learning Cache — it gets faster the more you use it
+
+WISP records which experts your sessions actually activate, in
+`{model_dir}/.wisp_usage`. On the next startup the hottest ones are
+queued for pre-warming before the first token is generated.
+
+```
+session 1   cold start; the LRU discovers your domain
+session 2   last session's top experts pre-warmed at startup
+session 7   near-instant warm start
+```
+
+Expert selection happens inside the C router, so the engine keeps a
+ring-buffer log of every (layer, expert) access that the runtime drains
+every 10 tokens — that stream feeds both the next-token prefetch
+predictor and the cross-session cache. Measured on a real Mixtral run:
+12 tokens produced 768 expert observations and 238 tracked experts, of
+which 107 were pre-warmed on the following startup.
+
+```bash
+wisp cache --model ./models/glm-5.2/ --show    # what it has learned
+wisp cache --model ./models/glm-5.2/ --reset   # start over
+```
+
+Ranking blends frequency with a recency decay, so a cache trained on
+three weeks of Rust adapts when you switch to prose instead of staying
+stuck on the old domain. The file is plain JSON — inspect it, diff it,
+or delete it.
+
+### OpenAI-Compatible API Server
+
+```bash
+wisp serve --model ./models/glm-5.2/ --port 8080
+```
+
+Anything that speaks the OpenAI API now speaks to WISP — Cursor,
+Continue.dev, Open WebUI, LM Studio frontends, the `openai` package:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="wisp")
+client.chat.completions.create(
+    model="glm-5.2",
+    messages=[{"role": "user", "content": "Write a quicksort"}],
+    stream=True,
+)
+```
+
+`/v1/chat/completions` (streaming + non-streaming), `/v1/models`,
+`/health`, and `/v1/stats` for WISP's own numbers (tok/s, tier hit
+breakdown, learning-cache state). Streaming is genuinely incremental —
+the engine's generator runs on a worker thread feeding the event loop,
+so the first token reaches the client as soon as it exists rather than
+after the whole completion. Prompts are rendered with each family's own
+chat template. Requests are serialized: one engine, one KV cache, so
+concurrent decoding would interleave two conversations.
+
+Install the extra: `pip install 'wisp-engine[server]'`
 
 ### Stability Guarantees
 
@@ -342,6 +431,11 @@ one canonical weight layout at conversion time.
 - Real DeepSeek-V3 benchmark numbers
 - Warm/hot steady-state Mixtral numbers (long runs)
 - Any community-reported bugs
+
+### Shipped since v1.0
+- [x] KDA linear-attention kernel (CUDA + PyTorch fallback)
+- [x] Learning cache — pre-warms hot experts across sessions
+- [x] OpenAI-compatible API server (`wisp serve`)
 
 ### v1.1 — Kimi K3
 Architecture is confirmed (technical report arXiv:2607.24653):

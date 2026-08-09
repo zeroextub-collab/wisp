@@ -166,7 +166,10 @@ class GenerationLoop:
             if stops.done:
                 return
 
-            # Predictive prefetch for the NEXT token overlaps this decode
+            # Learn what the router actually chose (selection happens in
+            # C), then predictively prefetch for the NEXT token. The
+            # drain must come first or the predictor works blind.
+            self.tier_cache.drain_engine_log()
             self.tier_cache.prefetch_all_layers()
 
             # Memory watermark: never let expert copies fill system RAM —

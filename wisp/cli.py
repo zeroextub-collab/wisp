@@ -157,6 +157,16 @@ def _open_engine(model_path: str, **kwargs):
     load_s = time.perf_counter() - t0
     print_startup_display(engine.profile, engine.adapter,
                           engine.config, load_s)
+    # Learning cache state — the "gets faster with use" signal
+    records = getattr(engine, "learned_records", 0)
+    if records:
+        sessions = engine.learning_cache.get_stats().get("sessions", 0)
+        click.echo(f"  Learning cache: {engine.prewarmed_experts:,} hot "
+                   f"experts pre-warming from {records:,} tracked "
+                   f"(session {sessions + 1})")
+    else:
+        click.echo("  Learning cache: empty (first run — it learns as "
+                   "you use it)")
     return engine
 
 
@@ -543,6 +553,97 @@ def info(model_ref: str, display_mode: str):
                        "add expert slots here —")
             click.echo("  the 75% VRAM safety cap binds before the "
                        "display reserve does.")
+
+
+# --------------------------------------------------------------------------- #
+@main.command()
+@click.option("--model", "model_path", required=True,
+              type=click.Path(exists=True), help="Converted model directory.")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Interface to bind.")
+@click.option("--port", default=8080, show_default=True,
+              help="Port to listen on.")
+@click.option("--public", is_flag=True,
+              help="Bind 0.0.0.0 — reachable from your network.")
+def serve(model_path: str, host: str, port: int, public: bool):
+    """Start an OpenAI-compatible API server.
+
+    \b
+    Works with Cursor, Continue.dev, Open WebUI, and any OpenAI client:
+      from openai import OpenAI
+      client = OpenAI(base_url="http://localhost:8080/v1", api_key="wisp")
+    """
+    from .server.app import HAS_FASTAPI, INSTALL_HINT, WispServer
+
+    if not HAS_FASTAPI:
+        raise click.ClickException(INSTALL_HINT)
+
+    if public:
+        host = "0.0.0.0"
+        click.echo(click.style(
+            "  WARNING: --public serves on all interfaces with no "
+            "authentication.\n"
+            "  Anyone who can reach this port can use your GPU and read "
+            "your model.\n"
+            "  Only do this on a network you trust.", fg="yellow"))
+
+    click.echo("  Starting WISP API server")
+    click.echo(f"    Model  : {model_path}")
+    click.echo(f"    Listen : http://{host}:{port}")
+    click.echo(f"    OpenAI : http://{'localhost' if host in ('127.0.0.1', '0.0.0.0') else host}:{port}/v1")
+    click.echo("    Ctrl+C to stop\n")
+
+    WispServer(model_dir=model_path, host=host, port=port).run()
+
+
+# --------------------------------------------------------------------------- #
+@main.command()
+@click.option("--model", "model_path", required=True,
+              type=click.Path(exists=True), help="Converted model directory.")
+@click.option("--show", is_flag=True, help="Show usage statistics.")
+@click.option("--reset", is_flag=True, help="Clear all learned usage.")
+@click.option("--top", default=10, show_default=True,
+              help="How many hot experts to list with --show.")
+def cache(model_path: str, show: bool, reset: bool, top: int):
+    """Inspect or clear the learning cache for a model.
+
+    WISP records which experts your sessions activate and pre-warms the
+    hottest ones on the next startup, so the engine gets faster the more
+    you use it. This is that data.
+    """
+    from .runtime.learning_cache import LearningCache
+
+    lc = LearningCache(Path(model_path))
+    lc.load()
+
+    if reset:
+        lc.reset()
+        click.echo(f"  Learning cache cleared for {model_path}")
+        click.echo("  The next run starts cold and relearns.")
+        return
+
+    stats = lc.get_stats()
+    if stats["status"] == "empty":
+        click.echo("  Learning cache: empty")
+        click.echo("  Run some inference and it will start learning "
+                   "which experts your work activates.")
+        return
+
+    click.echo(f"  Learning cache for {Path(model_path).name}")
+    click.echo(f"    Experts tracked : {stats['experts_tracked']:,}")
+    click.echo(f"    Total hits      : {stats['total_hits']:,}")
+    click.echo(f"    Sessions        : {stats['sessions']}")
+    t = stats["top_expert"]
+    click.echo(f"    Hottest expert  : L{t.layer_id:03d}_E{t.expert_id:05d}"
+               f"  ({t.hit_count:,} hits)")
+
+    if show and top > 0:
+        click.echo(f"\n    Top {top} experts (pre-warmed at startup):")
+        for i, (layer, expert) in enumerate(
+                lc.get_hot_experts(top_n=top), start=1):
+            rec = lc.records[(layer, expert)]
+            click.echo(f"      {i:>3}. L{layer:03d}_E{expert:05d}"
+                       f"  {rec.hit_count:>8,} hits")
 
 
 # --------------------------------------------------------------------------- #

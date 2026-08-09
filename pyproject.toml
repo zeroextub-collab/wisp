@@ -15,6 +15,11 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+# NOTE: package metadata (name, version, extras) lives in setup.py —
+# the CMake extension build needs its imperative hooks. A [project]
+# table here would have to duplicate all of it, and a partial one is
+# invalid PEP 621.
+
 [tool.pytest.ini_options]
 markers = [
     "engine: requires the compiled C extension (wisp._wisp_core); deselect with -m 'not engine' where the engine may be absent, e.g. CI runners",

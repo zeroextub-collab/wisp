@@ -126,6 +126,8 @@ setup(
     install_requires=requirements,
     extras_require={
         "dev": ["pytest>=7.0"],
+        "server": ["fastapi>=0.111.0", "uvicorn>=0.30.0"],
+        "all": ["pytest>=7.0", "fastapi>=0.111.0", "uvicorn>=0.30.0"],
     },
     entry_points={
         "console_scripts": [

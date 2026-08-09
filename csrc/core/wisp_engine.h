@@ -410,6 +410,19 @@ typedef struct WispEngine {
     float* hs_h;               /* [inter]                                   */
     float* hs_y;               /* [hidden]                                  */
 
+    /* Expert access log. Routing happens down here in C, so without
+     * this the Python layer is blind to which experts actually fired —
+     * its prefetch predictor and the cross-session learning cache would
+     * both be guessing. Each fetch appends a packed (layer << 16 |
+     * expert) word to a ring buffer that Python drains periodically.
+     * Written under stats_mutex, which the fetch path already takes,
+     * so logging costs no extra lock. */
+    uint32_t* access_log;
+    int       access_log_cap;
+    int       access_log_count;    /* valid entries, <= cap            */
+    int       access_log_head;     /* next write slot                  */
+    uint64_t  access_log_dropped;  /* lost to wrap-around              */
+
     /* stats */
     wisp_mutex_t stats_mutex;
     uint64_t vram_hits;
@@ -472,6 +485,13 @@ void wisp_cache_clear_all(WispEngine* eng);
  * authoritative — this is a pure free). Used by the runtime's memory
  * watermark to keep system RAM from filling completely. */
 int  wisp_ram_trim(WispEngine* eng, int count);
+
+/* Drain the expert access log into `out` (packed layer<<16|expert).
+ * Returns the number written; clears the log. `dropped_out` receives
+ * the running count of entries lost to ring wrap-around, so the caller
+ * can tell a complete record from a sampled one. */
+int  wisp_drain_expert_log(WispEngine* eng, uint32_t* out, int max_out,
+                           uint64_t* dropped_out);
 size_t wisp_vram_used(WispEngine* eng);
 size_t wisp_ram_used(WispEngine* eng);
 double wisp_tok_per_sec(WispEngine* eng);
@@ -479,6 +499,9 @@ double wisp_tok_per_sec(WispEngine* eng);
 /* Self-tests (exposed to pytest through the bindings) */
 int wisp_selftest_lru(void);
 int wisp_selftest_double_buffer(void);
+#ifndef WISP_NO_CUDA
+int wisp_selftest_kda(void);   /* verifies the KDA recurrence on-device */
+#endif
 
 /* Byte-layout cross-check (exposed to pytest): parse an expert .bin
  * written by wisp/converter/partitioner.py and dequantize the first
@@ -567,6 +590,31 @@ void wisp_gpu_verify_batch(const float* main_probs, const float* draft_probs,
 void wisp_gpu_verify_scan(const float* accept_probs, const float* rand_u,
                           int K, int* n_accepted, int* first_reject,
                           cudaStream_t s);   /* on-GPU acceptance scan */
+
+/* kda_attention.cu — Kimi Delta Attention (69 of K3's 93 layers).
+ * State is [batch, heads, d_k, d_v] per layer and CONSTANT in sequence
+ * length; that is the whole point of linear attention. */
+size_t wisp_kda_state_bytes(int batch_size, int num_heads, int d_k,
+                            int d_v, int num_kda_layers);
+cudaError_t wisp_kda_alloc_state(void** state_ptr, int batch_size,
+                                 int num_heads, int d_k, int d_v,
+                                 int num_kda_layers);
+cudaError_t wisp_kda_free_state(void* state_ptr);
+cudaError_t wisp_kda_reset_state(void* state_ptr, int batch_size,
+                                 int num_heads, int d_k, int d_v,
+                                 int num_kda_layers, cudaStream_t stream);
+cudaError_t wisp_kda_decode_step(float* state,
+                                 const wisp_half* q, const wisp_half* k,
+                                 const wisp_half* v, const wisp_half* beta,
+                                 const wisp_half* gate, wisp_half* output,
+                                 int batch_size, int num_heads,
+                                 int d_k, int d_v, cudaStream_t stream);
+cudaError_t wisp_kda_prefill(float* state_out, const float* state_in,
+                             const wisp_half* q, const wisp_half* k,
+                             const wisp_half* v, const wisp_half* beta,
+                             const wisp_half* gate, wisp_half* output,
+                             int batch_size, int seq_len, int num_heads,
+                             int d_k, int d_v, cudaStream_t stream);
 
 /* multi_gpu.cu */
 int  wisp_nccl_available(void);

@@ -832,12 +832,46 @@ static void* vram_alloc_evicting(WispEngine* eng, size_t size,
     }
 }
 
-static void stat_hit(WispEngine* eng, int tier) {
+/* Records a tier hit AND appends to the expert access log. Both happen
+ * under the one lock the fetch path already takes, so the log is free
+ * beyond a couple of stores. */
+static void stat_hit_logged(WispEngine* eng, int tier,
+                            uint32_t layer, uint32_t expert) {
     wisp_mutex_lock(&eng->stats_mutex);
     if (tier == 0) eng->vram_hits++;
     else if (tier == 1) eng->ram_hits++;
     else eng->ssd_hits++;
+
+    if (eng->access_log && eng->access_log_cap > 0) {
+        eng->access_log[eng->access_log_head] =
+            ((layer & 0xFFFFu) << 16) | (expert & 0xFFFFu);
+        eng->access_log_head =
+            (eng->access_log_head + 1) % eng->access_log_cap;
+        if (eng->access_log_count < eng->access_log_cap)
+            eng->access_log_count++;
+        else
+            eng->access_log_dropped++;   /* oldest entry overwritten */
+    }
     wisp_mutex_unlock(&eng->stats_mutex);
+}
+
+int wisp_drain_expert_log(WispEngine* eng, uint32_t* out, int max_out,
+                          uint64_t* dropped_out) {
+    if (!eng || !out || max_out <= 0) return 0;
+    wisp_mutex_lock(&eng->stats_mutex);
+    int n = eng->access_log_count;
+    if (n > max_out) n = max_out;
+    /* Oldest-first: the ring's tail is head - count (mod cap). */
+    int start = (eng->access_log_head - eng->access_log_count
+                 + eng->access_log_cap * 2) % eng->access_log_cap;
+    for (int i = 0; i < n; i++)
+        out[i] = eng->access_log[(start + i) % eng->access_log_cap];
+    if (dropped_out) *dropped_out = eng->access_log_dropped;
+    eng->access_log_count = 0;
+    eng->access_log_head = 0;
+    eng->access_log_dropped = 0;
+    wisp_mutex_unlock(&eng->stats_mutex);
+    return n;
 }
 
 /* Serve an expert blob through the scratch ring: one H2D copy into a
@@ -876,7 +910,7 @@ void* wisp_expert_fetch(WispEngine* eng, uint32_t layer_id,
         LRUNode* node = lru_get(eng->vram_cache, layer_id, expert_id);
         if (node) {
             lru_touch(eng->vram_cache, node);
-            stat_hit(eng, 0);
+            stat_hit_logged(eng, 0, layer_id, expert_id);
             return node->data_ptr;
         }
     }
@@ -885,7 +919,7 @@ void* wisp_expert_fetch(WispEngine* eng, uint32_t layer_id,
     LRUNode* node = lru_get(eng->ram_cache, layer_id, expert_id);
     if (node) {
         lru_touch(eng->ram_cache, node);
-        stat_hit(eng, 1);
+        stat_hit_logged(eng, 1, layer_id, expert_id);
         /* Prefetched blobs may not have populated the layer meta yet */
         if (!eng->expert_meta[layer_id].valid) {
             if (wisp_expert_parse_header(node->data_ptr, node->size_bytes,
@@ -954,7 +988,7 @@ void* wisp_expert_fetch(WispEngine* eng, uint32_t layer_id,
         else free(staging);
         return NULL;   /* err already set by read_expert_ssd */
     }
-    stat_hit(eng, 2);
+    stat_hit_logged(eng, 2, layer_id, expert_id);
 
     /* Parse layer meta on first sight (all experts in a layer share shape) */
     if (!eng->expert_meta[layer_id].valid) {
@@ -1820,6 +1854,16 @@ WispEngine* wisp_engine_create(const char* model_path,
         goto fail;
     }
 
+    /* Expert access log: sized for ~16 tokens of lookups so a runtime
+     * that drains every 10 tokens never loses an entry. Non-fatal if it
+     * cannot be allocated — the engine just stops reporting usage. */
+    eng->access_log_cap = eng->cfg.top_k * eng->cfg.num_layers * 16;
+    if (eng->access_log_cap < 4096) eng->access_log_cap = 4096;
+    if (eng->access_log_cap > 1 << 20) eng->access_log_cap = 1 << 20;
+    eng->access_log = (uint32_t*)calloc((size_t)eng->access_log_cap,
+                                        sizeof(uint32_t));
+    if (!eng->access_log) eng->access_log_cap = 0;
+
 #ifndef WISP_NO_CUDA
     if (eng->use_gpu) {
         if (cudaStreamCreate(&eng->compute_stream) != cudaSuccess ||
@@ -1926,6 +1970,7 @@ void wisp_engine_destroy(WispEngine* eng) {
         free(eng->layers);
     }
     free(eng->expert_meta);
+    free(eng->access_log);
 
     eng_free(eng, eng->buf_x);        eng_free(eng, eng->buf_norm);
     eng_free(eng, eng->buf_attn_a);   eng_free(eng, eng->buf_attn_b);

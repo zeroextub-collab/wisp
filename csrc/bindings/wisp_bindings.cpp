@@ -242,6 +242,105 @@ PYBIND11_MODULE(_wisp_core, m) {
         return wisp_ram_trim(eng, count);
     }, py::arg("handle"), py::arg("count"));
 
+    /* Which experts actually fired since the last drain. Routing lives
+     * in C, so this is how the Python prefetch predictor and the
+     * cross-session learning cache learn anything at all. Returns
+     * {"hits": [(layer, expert), ...], "dropped": int}. */
+    m.def("drain_expert_log", [](int handle, int max_entries) {
+        WispEngine* eng = engine_of(handle);
+        if (max_entries <= 0) max_entries = 1 << 16;
+        std::vector<uint32_t> raw((size_t)max_entries);
+        uint64_t dropped = 0;
+        int n;
+        {
+            py::gil_scoped_release release;
+            n = wisp_drain_expert_log(eng, raw.data(), max_entries,
+                                      &dropped);
+        }
+        py::list hits;
+        for (int i = 0; i < n; i++)
+            hits.append(py::make_tuple((int)(raw[i] >> 16),
+                                       (int)(raw[i] & 0xFFFFu)));
+        py::dict out;
+        out["hits"] = hits;
+        out["dropped"] = (int64_t)dropped;
+        return out;
+    }, py::arg("handle"), py::arg("max_entries") = 0);
+
+    /* --- KDA (Kimi Delta Attention) ---------------------------------- *
+     * Deliberately pointer-based rather than torch::Tensor: WISP's
+     * extension does not link libtorch, and adding that dependency to
+     * get typed arguments would be a large build change for no gain.
+     * Callers pass tensor.data_ptr() plus shapes; the Python wrapper in
+     * wisp/runtime/kda_layer.py owns dtype/device/contiguity checks. */
+#ifndef WISP_NO_CUDA
+    m.def("kda_decode_step_ptr",
+          [](int64_t state, int64_t q, int64_t k, int64_t v,
+             int64_t beta, int64_t gate, int64_t out,
+             int batch, int heads, int d_k, int d_v) {
+              cudaError_t e;
+              {
+                  py::gil_scoped_release release;
+                  e = wisp_kda_decode_step(
+                      reinterpret_cast<float*>(state),
+                      reinterpret_cast<const wisp_half*>(q),
+                      reinterpret_cast<const wisp_half*>(k),
+                      reinterpret_cast<const wisp_half*>(v),
+                      reinterpret_cast<const wisp_half*>(beta),
+                      reinterpret_cast<const wisp_half*>(gate),
+                      reinterpret_cast<wisp_half*>(out),
+                      batch, heads, d_k, d_v, /*stream=*/0);
+                  if (e == cudaSuccess) e = cudaStreamSynchronize(0);
+              }
+              if (e != cudaSuccess)
+                  throw std::runtime_error(
+                      std::string("kda_decode_step failed: ")
+                      + cudaGetErrorString(e));
+          },
+          py::arg("state"), py::arg("q"), py::arg("k"), py::arg("v"),
+          py::arg("beta"), py::arg("gate"), py::arg("out"),
+          py::arg("batch"), py::arg("heads"), py::arg("d_k"),
+          py::arg("d_v"));
+
+    m.def("kda_prefill_ptr",
+          [](int64_t state_out, int64_t state_in, int64_t q, int64_t k,
+             int64_t v, int64_t beta, int64_t gate, int64_t out,
+             int batch, int seq_len, int heads, int d_k, int d_v) {
+              cudaError_t e;
+              {
+                  py::gil_scoped_release release;
+                  e = wisp_kda_prefill(
+                      reinterpret_cast<float*>(state_out),
+                      reinterpret_cast<const float*>(state_in),
+                      reinterpret_cast<const wisp_half*>(q),
+                      reinterpret_cast<const wisp_half*>(k),
+                      reinterpret_cast<const wisp_half*>(v),
+                      reinterpret_cast<const wisp_half*>(beta),
+                      reinterpret_cast<const wisp_half*>(gate),
+                      reinterpret_cast<wisp_half*>(out),
+                      batch, seq_len, heads, d_k, d_v, /*stream=*/0);
+                  if (e == cudaSuccess) e = cudaStreamSynchronize(0);
+              }
+              if (e != cudaSuccess)
+                  throw std::runtime_error(
+                      std::string("kda_prefill failed: ")
+                      + cudaGetErrorString(e));
+          },
+          py::arg("state_out"), py::arg("state_in"), py::arg("q"),
+          py::arg("k"), py::arg("v"), py::arg("beta"), py::arg("gate"),
+          py::arg("out"), py::arg("batch"), py::arg("seq_len"),
+          py::arg("heads"), py::arg("d_k"), py::arg("d_v"));
+
+    m.def("kda_state_bytes", &wisp_kda_state_bytes,
+          py::arg("batch"), py::arg("heads"), py::arg("d_k"),
+          py::arg("d_v"), py::arg("layers"));
+
+    m.def("_selftest_kda", []() -> bool {
+        py::gil_scoped_release release;
+        return wisp_selftest_kda() == 1;
+    });
+#endif
+
     /* --- Expert management ------------------------------------------ */
     m.def("expert_prefetch_hint",
           [](int handle, int layer_idx, const std::vector<int>& expert_ids) {

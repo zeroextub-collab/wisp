@@ -84,15 +84,18 @@ class TierCache:
 
     HISTORY_WINDOW = 64  # tokens of expert-usage history kept per layer
 
-    def __init__(self, core, handle: int, num_layers: int, top_k: int):
+    def __init__(self, core, handle: int, num_layers: int, top_k: int,
+                 learning_cache=None):
         self._core = core
         self._handle = handle
         self.num_layers = num_layers
         self.top_k = top_k
+        self.learning_cache = learning_cache
         # Per-layer recency + frequency of expert activations
         self._recent: list[PyLRU] = [
             PyLRU(self.HISTORY_WINDOW) for _ in range(num_layers)]
         self._freq: list[Counter] = [Counter() for _ in range(num_layers)]
+        self.dropped_observations = 0
 
     # ------------------------------------------------------------------ #
     # C cache passthrough
@@ -123,6 +126,36 @@ class TierCache:
         for e in expert_ids:
             lru.put(e)
             freq[e] += 1
+
+    def drain_engine_log(self) -> int:
+        """
+        Pull the experts that actually fired out of the C engine and feed
+        them to both the prefetch predictor and the learning cache.
+
+        Expert selection happens inside the C router kernel, so without
+        this the Python side never learns anything: predict() would run
+        on an empty frequency table forever and every prefetch hint
+        would be empty. Returns the number of accesses ingested.
+        """
+        if not hasattr(self._core, "drain_expert_log"):
+            return 0
+        try:
+            drained = self._core.drain_expert_log(self._handle, 0)
+        except Exception:
+            return 0
+
+        hits = drained.get("hits", [])
+        self.dropped_observations += int(drained.get("dropped", 0))
+        if not hits:
+            return 0
+
+        for layer, expert in hits:
+            if 0 <= layer < self.num_layers:
+                self._recent[layer].put(expert)
+                self._freq[layer][expert] += 1
+        if self.learning_cache is not None:
+            self.learning_cache.record_hits(hits)
+        return len(hits)
 
     def predict(self, layer_idx: int) -> list[int]:
         """

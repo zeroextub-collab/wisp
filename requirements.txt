@@ -14,3 +14,10 @@ py-cpuinfo>=9.0.0
 pybind11>=2.11.0
 tqdm>=4.66.0
 click>=8.1.0
+
+# NOTE: this file IS install_requires (setup.py reads it), so everything
+# listed here is mandatory. The `wisp serve` dependencies are deliberately
+# NOT here — they are the optional `server` extra:
+#     pip install 'wisp-engine[server]'      (fastapi + uvicorn)
+# wisp/server/app.py imports cleanly without them and the CLI prints an
+# install hint, so a core install stays lean.
