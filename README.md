@@ -2,7 +2,7 @@
 
 > Stream what shouldn't run.
 
-[![Tests](https://img.shields.io/badge/tests-121%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-143%20passing-brightgreen)]()
 [![CUDA](https://img.shields.io/badge/CUDA-12.0%2B%20%7C%2013.x-76b900)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
@@ -195,6 +195,26 @@ chat template. Requests are serialized: one engine, one KV cache, so
 concurrent decoding would interleave two conversations.
 
 Install the extra: `pip install 'wisp-engine[server]'`
+
+### Desktop GUI
+
+```bash
+pip install 'wisp-engine[gui,server]'
+wisp-gui                      # or: wisp-gui ./models/mixtral-8x7b
+```
+
+Three columns: model + generation controls on the left, chat in the
+middle, live tier and engine monitors on the right. The tier bars show
+VRAM and RAM occupancy against this machine's real capacities, refreshed
+every two seconds alongside tok/s, cache hit rate, expert lookups and
+learning-cache state.
+
+The GUI is not a wrapper around the CLI — it never shells out or parses
+terminal output. It hosts the very same `WispServer` in a background
+thread on a private loopback port and talks to it over the OpenAI API,
+so the path it exercises is byte-for-byte the one Cursor and Open WebUI
+use. Closing the window shuts the server down cooperatively, which is
+what lets the learning cache persist.
 
 ### Stability Guarantees
 
@@ -436,6 +456,7 @@ one canonical weight layout at conversion time.
 - [x] KDA linear-attention kernel (CUDA + PyTorch fallback)
 - [x] Learning cache — pre-warms hot experts across sessions
 - [x] OpenAI-compatible API server (`wisp serve`)
+- [x] Desktop GUI (`wisp-gui`) — chat + live tier/stat monitors
 
 ### v1.1 — Kimi K3
 Architecture is confirmed (technical report arXiv:2607.24653):

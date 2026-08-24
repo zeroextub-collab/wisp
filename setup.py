@@ -127,11 +127,18 @@ setup(
     extras_require={
         "dev": ["pytest>=7.0"],
         "server": ["fastapi>=0.111.0", "uvicorn>=0.30.0"],
-        "all": ["pytest>=7.0", "fastapi>=0.111.0", "uvicorn>=0.30.0"],
+        # The GUI hosts the server in-process, so it pulls the server
+        # extra in with it rather than failing at Start Server time.
+        "gui": ["PySide6>=6.7.0", "fastapi>=0.111.0", "uvicorn>=0.30.0"],
+        "all": ["pytest>=7.0", "fastapi>=0.111.0", "uvicorn>=0.30.0",
+                "PySide6>=6.7.0"],
     },
     entry_points={
         "console_scripts": [
             "wisp = wisp.cli:main",
+        ],
+        "gui_scripts": [
+            "wisp-gui = wisp.gui.app:main",
         ],
     },
     classifiers=[

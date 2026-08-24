@@ -15,10 +15,13 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
-# NOTE: package metadata (name, version, extras) lives in setup.py —
-# the CMake extension build needs its imperative hooks. A [project]
-# table here would have to duplicate all of it, and a partial one is
-# invalid PEP 621.
+# NOTE: package metadata — name, version, extras ([server], [gui]) and
+# entry points (wisp, wisp-gui) — lives in setup.py, because the CMake
+# extension build needs its imperative hooks. A [project] table here
+# would have to duplicate all of it, and a PARTIAL one is invalid PEP
+# 621: setuptools rejects a [project] table without name/version, so
+# adding just [project.optional-dependencies] or [project.scripts]
+# breaks the build outright.
 
 [tool.pytest.ini_options]
 markers = [

@@ -1,0 +1,5 @@
+# WISP desktop GUI (`wisp-gui`). Optional — install with:
+#     pip install 'wisp-engine[gui,server]'
+# The GUI hosts the API server in-process, so it needs the server extra
+# (fastapi + uvicorn) as well as Qt.
+PySide6>=6.7.0
