@@ -56,6 +56,8 @@ DENSE_SIZE: dict[str, int] = {
     "kimi_k3":    12_000_000_000,   # Estimated (larger model)
     "mixtral_8x7b":   3_211_293_768,   # MEASURED (fp16 dense safetensors)
     "mixtral_8x22b": 10_700_000_000,   # computed from architecture (~10.7 GB)
+    "qwen3_235b":   6_000_000_000,   # estimated (4096 hidden, 94 layers)
+    "qwen3_2_4t":  20_000_000_000,   # estimated
 }
 
 NUM_LAYERS: dict[str, int] = {
@@ -68,6 +70,8 @@ NUM_LAYERS: dict[str, int] = {
     "kimi_k3":     93,
     "mixtral_8x7b":  32,
     "mixtral_8x22b": 56,
+    "qwen3_235b":  94,   # CONFIRMED — config.json
+    "qwen3_2_4t":  160,  # ESTIMATED — config not public; read at convert time
 }
 
 TOP_K_ROUTING: dict[str, int] = {
@@ -77,6 +81,8 @@ TOP_K_ROUTING: dict[str, int] = {
     "kimi_k3":     16,   # CONFIRMED — official Moonshot sources, July 2026
     "mixtral_8x7b":  2,
     "mixtral_8x22b": 2,
+    "qwen3_235b":  8,    # CONFIRMED — num_experts_per_tok
+    "qwen3_2_4t":  8,    # estimated (same family)
 }
 
 NUM_EXPERTS_PER_LAYER: dict[str, int] = {
@@ -86,6 +92,8 @@ NUM_EXPERTS_PER_LAYER: dict[str, int] = {
     "kimi_k3":     896,  # CONFIRMED — official Moonshot sources, July 2026
     "mixtral_8x7b":  8,
     "mixtral_8x22b": 8,
+    "qwen3_235b":  128,  # CONFIRMED — num_experts
+    "qwen3_2_4t":  128,  # estimated
 }
 
 NUM_SHARED_EXPERTS: dict[str, int] = {
@@ -95,6 +103,10 @@ NUM_SHARED_EXPERTS: dict[str, int] = {
     "kimi_k3":     2,   # CONFIRMED — arXiv:2607.24653 (was estimated 1)
     "mixtral_8x7b":  0,   # pure routed MoE — no shared experts
     "mixtral_8x22b": 0,
+    # Qwen3 MoE REMOVED the shared expert that Qwen2-MoE had —
+    # shared_expert_intermediate_size is absent from the config.
+    "qwen3_235b":  0,
+    "qwen3_2_4t":  0,
 }
 
 TOTAL_PARAMETERS: dict[str, int] = {
@@ -104,6 +116,8 @@ TOTAL_PARAMETERS: dict[str, int] = {
     "kimi_k3":   2_800_000_000_000,
     "mixtral_8x7b":   46_700_000_000,
     "mixtral_8x22b": 141_000_000_000,
+    "qwen3_235b":   235_000_000_000,
+    "qwen3_2_4t": 2_400_000_000_000,
 }
 
 HIDDEN_SIZE: dict[str, int] = {
@@ -113,6 +127,8 @@ HIDDEN_SIZE: dict[str, int] = {
     "kimi_k3":     7168,  # CONFIRMED — arXiv:2607.24653 (was estimated 8192)
     "mixtral_8x7b":  4096,
     "mixtral_8x22b": 6144,
+    "qwen3_235b":  4096,  # CONFIRMED — NOT 7168 (that is GLM/K3)
+    "qwen3_2_4t":  8192,  # estimated
 }
 
 VOCAB_SIZE: dict[str, int] = {
@@ -122,6 +138,8 @@ VOCAB_SIZE: dict[str, int] = {
     "kimi_k3":     160_000,  # Estimated
     "mixtral_8x7b":  32_000,
     "mixtral_8x22b": 32_000,
+    "qwen3_235b":  151_936,  # CONFIRMED
+    "qwen3_2_4t":  151_936,  # estimated
 }
 
 ATTENTION_TYPE: dict[str, str] = {
@@ -135,6 +153,8 @@ ATTENTION_TYPE: dict[str, str] = {
     "kimi_k3":     "KDA",
     "mixtral_8x7b":  "GQA",   # 32 query heads / 8 KV heads
     "mixtral_8x22b": "GQA",   # 48 query heads / 8 KV heads
+    "qwen3_235b":  "GQA",   # 64 query / 4 KV heads — NOT MLA
+    "qwen3_2_4t":  "GQA",
 }
 
 # Parameters actually activated per token (dense path + routed experts).
@@ -147,6 +167,8 @@ ACTIVE_PARAMETERS: dict[str, int] = {
     "kimi_k3":      104_000_000_000,  # CONFIRMED — arXiv:2607.24653 (104.2B)
     "mixtral_8x7b":  13_000_000_000,
     "mixtral_8x22b": 39_000_000_000,
+    "qwen3_235b":  22_000_000_000,   # A22B
+    "qwen3_2_4t":  22_000_000_000,   # estimated
 }
 
 # Layer-level attention layout. Uniform families just repeat one kind of
@@ -161,6 +183,8 @@ ATTENTION_PATTERN: dict[str, str] = {
     "kimi_k3":       "3x KDA + 1x GatedMLA repeating (69 KDA / 24 MLA)",
     "mixtral_8x7b":  "uniform GQA",
     "mixtral_8x22b": "uniform GQA",
+    "qwen3_235b":  "uniform GQA",
+    "qwen3_2_4t":  "uniform GQA",
 }
 
 # Expert-level sparsity = experts_per_layer / top_k. NOTE this is a
@@ -179,6 +203,8 @@ MAX_POSITION_EMBEDDINGS: dict[str, int] = {
     "kimi_k3":     1_048_576,  # CONFIRMED — 1M-token context (2^20 exactly)
     "mixtral_8x7b":     32_768,
     "mixtral_8x22b":    65_536,
+    "qwen3_235b":  32_768,
+    "qwen3_2_4t":  32_768,
 }
 
 # ---------------------------------------------------------------------------
@@ -191,6 +217,8 @@ HF_MODEL_ID: dict[str, str] = {
     "kimi_k3":     "moonshotai/Kimi-K3",
     "mixtral_8x7b":  "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "mixtral_8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
+    "qwen3_235b":  "Qwen/Qwen3-235B-A22B",
+    "qwen3_2_4t":  "Qwen/Qwen3-2.4T",   # anticipated repo
 }
 
 # ---------------------------------------------------------------------------
@@ -208,6 +236,8 @@ DRAFTER_HF_ID: dict[str, str] = {
     "mixtral_8x7b":  "mistralai/Mistral-7B-Instruct-v0.3",
     # Mixtral 8x7B drafts for 8x22B — same family, same tokenizer
     "mixtral_8x22b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "qwen3_235b":  "Qwen/Qwen3-1.7B",
+    "qwen3_2_4t":  "Qwen/Qwen3-1.7B",
 }
 
 DEFAULT_ACCEPTANCE_RATE: dict[str, float] = {
@@ -217,6 +247,8 @@ DEFAULT_ACCEPTANCE_RATE: dict[str, float] = {
     "kimi_k3":     0.42,
     "mixtral_8x7b":  0.41,
     "mixtral_8x22b": 0.38,
+    "qwen3_235b":  0.48,
+    "qwen3_2_4t":  0.46,
 }
 
 # Approximate drafter footprints for the VRAM fit logic (bytes).
@@ -226,6 +258,7 @@ DRAFTER_SIZE_FP16: dict[str, int] = {
     "moonshotai/Kimi-K2":                          2_000 * GB,  # 1T model — never fits VRAM
     "mistralai/Mistral-7B-Instruct-v0.3":         14_500 * MB,
     "mistralai/Mixtral-8x7B-Instruct-v0.1":       93_000 * MB,
+    "Qwen/Qwen3-1.7B":                             3_400 * MB,
 }
 
 DRAFTER_SIZE_INT4: dict[str, int] = {
@@ -234,6 +267,7 @@ DRAFTER_SIZE_INT4: dict[str, int] = {
     "moonshotai/Kimi-K2":                            550 * GB,  # -> CPU path
     "mistralai/Mistral-7B-Instruct-v0.3":          3_900 * MB,
     "mistralai/Mixtral-8x7B-Instruct-v0.1":       24_000 * MB,
+    "Qwen/Qwen3-1.7B":                               900 * MB,
 }
 
 # ---------------------------------------------------------------------------
@@ -248,6 +282,8 @@ DISK_SIZE_INT4: dict[str, int] = {
     "kimi_k3":    1440 * GB,   # ~1.4 TB
     "mixtral_8x7b":   27 * GB,   # MEASURED 26.6 GB (3.2 dense + 25.4 experts)
     "mixtral_8x22b":  90 * GB,   # computed: 76 GB experts + 10.7 GB dense
+    "qwen3_235b":  130 * GB,   # 12,032 experts x ~10.6MB + dense
+    "qwen3_2_4t": 1200 * GB,   # estimated
 }
 
 # ---------------------------------------------------------------------------

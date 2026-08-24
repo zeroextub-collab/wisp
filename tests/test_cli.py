@@ -33,6 +33,15 @@ def test_info_by_model_name_kimi_k3(runner):
     assert "unverified" in result.output
 
 
+def test_info_by_model_name_qwen3(runner):
+    result = runner.invoke(main, ["info", "--model", "qwen3-235b"])
+    assert result.exit_code == 0, result.output
+    assert "Qwen3-235B-A22B" in result.output
+    assert "128" in result.output              # experts per layer
+    assert "752" in result.output              # lookups/token = 94 x 8
+    assert "GQA" in result.output
+
+
 def test_info_by_model_name_glm(runner):
     result = runner.invoke(main, ["info", "--model", "glm-5.2"])
     assert result.exit_code == 0, result.output

@@ -215,10 +215,114 @@ def test_gqa_kv_expansion():
         assert torch.equal(kv_expanded[:, q_head], kv[:, q_head // ratio])
 
 
+def test_qwen3_235b_lookup_math():
+    """94 MoE layers x top-8 = 752 lookups/token (config-verified)."""
+    a = get_adapter("qwen3-235b")
+    assert a.num_layers == 94
+    assert a.num_experts_per_layer == 128
+    assert a.top_k_routing == 8
+    assert a.num_moe_layers == 94          # every layer is MoE on 235B
+    assert a.total_expert_lookups_per_token == 752
+    assert a.total_expert_count == 94 * 128
+    assert a.total_parameters == 235_000_000_000
+    assert a.active_parameters_per_token == 22_000_000_000
+
+
+def test_qwen3_moe_expert_tensor_pattern():
+    a = get_adapter("qwen3-235b")
+    m = a.expert_weight_pattern.match(
+        "model.layers.7.mlp.experts.42.gate_proj.weight")
+    assert m and (int(m.group("layer")), int(m.group("expert")),
+                  m.group("proj")) == (7, 42, "gate_proj")
+    keys = a.get_expert_key(7, 42)
+    assert keys == ["model.layers.7.mlp.experts.42.gate_proj.weight",
+                    "model.layers.7.mlp.experts.42.up_proj.weight",
+                    "model.layers.7.mlp.experts.42.down_proj.weight"]
+    assert a.get_router_key(7) == "model.layers.7.mlp.gate.weight"
+
+
+def test_qwen3_moe_uses_gqa_not_mla():
+    """Qwen3 is plain GQA — it must take Mixtral's path, not DeepSeek's
+    absorbed-MLA path, or attention would read latents that do not
+    exist."""
+    a = get_adapter("qwen3-235b")
+    assert a.attention_type == "GQA"
+    assert a.num_attention_heads == 64
+    assert a.num_kv_heads == 4
+    assert a.num_attention_heads % a.num_kv_heads == 0
+
+
+def test_qwen3_moe_has_no_shared_expert():
+    """Qwen2-MoE had a shared expert; Qwen3 removed it. The key is absent
+    from the published config, so treating it as present would map a
+    tensor that does not exist."""
+    a = get_adapter("qwen3-235b")
+    assert a.num_shared_experts == 0
+
+
+def test_qwen3_hidden_size_is_4096_not_7168():
+    """Guards a real mix-up: 7168 is GLM-5.2 / Kimi K3, not Qwen3."""
+    a = get_adapter("qwen3-235b")
+    assert a.hidden_size == 4096
+    assert get_adapter("glm-5.2").hidden_size == 7168
+
+
+def test_qwen3_registry_resolves_aliases():
+    from wisp.models.qwen3_moe import Qwen3MoEAdapter, Qwen3_2_4T_Adapter
+    for alias in ("qwen3-235b", "qwen3-235b-a22b", "qwen3-moe",
+                  "Qwen/Qwen3-235B-A22B"):
+        assert isinstance(get_adapter(alias), Qwen3MoEAdapter)
+    for alias in ("qwen3.8", "qwen3-2.4t"):
+        a = get_adapter(alias)
+        assert isinstance(a, Qwen3_2_4T_Adapter)
+        assert a.total_parameters == 2_400_000_000_000
+
+
+def test_qwen3_moe_reads_num_layers_from_config(tmp_path):
+    """One class covers 235B and 2.4T because depth comes from the
+    checkpoint, not a hardcoded table."""
+    import json
+    from wisp.models.qwen3_moe import Qwen3MoEAdapter
+
+    cfg = {"num_hidden_layers": 160, "num_experts": 256,
+           "num_experts_per_tok": 4, "hidden_size": 8192,
+           "moe_intermediate_size": 2048, "num_attention_heads": 96,
+           "num_key_value_heads": 8, "vocab_size": 151936,
+           "decoder_sparse_step": 1, "mlp_only_layers": []}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+
+    a = Qwen3MoEAdapter.from_config(tmp_path)
+    assert a.num_layers == 160
+    assert a.num_experts_per_layer == 256
+    assert a.top_k_routing == 4
+    assert a.hidden_size == 8192
+    assert a.total_expert_lookups_per_token == 160 * 4
+    # Expert size follows the real shapes, not a lookup table
+    assert a.expert_size_bytes == int(3 * 2048 * 8192 * 0.5625) + 120
+
+
+def test_qwen3_moe_respects_dense_layer_interleave(tmp_path):
+    """mlp_only_layers / decoder_sparse_step thin out which layers route;
+    lookups must count MoE layers only."""
+    import json
+    from wisp.models.qwen3_moe import Qwen3MoEAdapter
+
+    cfg = {"num_hidden_layers": 10, "num_experts": 8,
+           "num_experts_per_tok": 2, "mlp_only_layers": [0, 1],
+           "decoder_sparse_step": 1}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    a = Qwen3MoEAdapter.from_config(tmp_path)
+    assert a.is_moe_layer(0) is False
+    assert a.is_moe_layer(2) is True
+    assert a.num_moe_layers == 8
+    assert a.total_expert_lookups_per_token == 8 * 2
+
+
 def test_registry_resolution_and_errors():
     assert set(supported_models()) == {"glm-5.2", "deepseek-v3",
                                        "deepseek-r1", "kimi-k3",
-                                       "mixtral-8x7b", "mixtral-8x22b"}
+                                       "mixtral-8x7b", "mixtral-8x22b",
+                                       "qwen3-235b", "qwen3-2.4t"}
     assert get_adapter("GLM-5.2").family == "glm52"
     assert get_adapter("zai-org/GLM-5.2").family == "glm52"
     assert get_adapter("kimi_k3").family == "kimi_k3"

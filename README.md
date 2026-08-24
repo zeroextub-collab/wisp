@@ -2,7 +2,7 @@
 
 > Stream what shouldn't run.
 
-[![Tests](https://img.shields.io/badge/tests-143%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-162%20passing-brightgreen)]()
 [![CUDA](https://img.shields.io/badge/CUDA-12.0%2B%20%7C%2013.x-76b900)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
@@ -31,7 +31,8 @@ and your NVMe SSD in real time.
 | Mixtral-8x7B | 47B | 13B | 64 | 26.6 GB* | ✅ **Verified end-to-end** |
 | Mixtral-8x22B | 141B | 39B | 112 | ~90 GB | ✅ Ready |
 | Kimi K3 | 2.8T | 104B | 1,488 | ~1.4 TB | ⚠️ KDA wired, names unverified |
-| Qwen3.8 | 2.4T | TBD | TBD | ~1.2TB est. | ⏳ Weights soon |
+| Qwen3-235B-A22B | 235B | 22B | 752 | ~130 GB | ✅ Ready |
+| Qwen3-2.4T | 2.4T | ~22B est. | config-driven | ~1.2 TB est. | ✅ Adapter ready — weights pending |
 
 *Measured from a real conversion — every expert file verified.
 "Verified end-to-end" means: downloaded, converted, and generated
