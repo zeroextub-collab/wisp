@@ -49,7 +49,12 @@ void  pinned_pool_free(PinnedPool* p, void* ptr);
  * Tracked VRAM allocation (device memory; host malloc in WISP_NO_CUDA)
  * ----------------------------------------------------------------------- */
 
-typedef struct {
+/* Tagged, not anonymous: wisp_engine.h forward-declares
+ * `struct VramBudget` so WispEngine can hold a pointer without pulling
+ * in this header. An anonymous typedef would make those two names
+ * DIFFERENT types — the compiler reinterprets the pointer silently
+ * (MSVC C4133) and the code only works by coincidence of layout. */
+typedef struct VramBudget {
     size_t       budget_bytes;
     size_t       used_bytes;
     wisp_mutex_t mutex;

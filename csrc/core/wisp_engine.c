@@ -1208,25 +1208,28 @@ static WispError run_kda_attention(WispEngine* eng, int layer,
                              : c->hidden / (c->n_heads > 0 ? c->n_heads : 1);
     int n = c->n_heads * hd;
 
-    /* Project: q, k, v, beta (decay), gate (SiLU output gate) */
-    op_gemv(eng, w->q_proj,   eng->buf_norm, eng->buf_attn_a, n, c->hidden);
-    op_gemv(eng, w->k_proj,   eng->buf_norm, eng->buf_attn_b, n, c->hidden);
-    op_gemv(eng, w->v_proj,   eng->buf_norm, eng->buf_attn_c, n, c->hidden);
-    op_gemv(eng, w->kda_beta, eng->buf_norm, eng->buf_gate,   n, c->hidden);
-    op_gemv(eng, w->kda_gate, eng->buf_norm, eng->buf_up,     n, c->hidden);
+    /* Project q, k, v, beta (write gate) and gate (SiLU output gate),
+     * converting each to fp16 before the next one overwrites the
+     * scratch. Everything here is queued on compute_stream, so the
+     * gemv -> convert pairs are ordered and a single fp32 buffer is
+     * enough for all five.
+     *
+     * This deliberately does NOT borrow buf_gate/buf_up: those are sized
+     * by the MoE intermediate width, which has nothing to do with
+     * n_heads * head_dim. On a model where the expert width is the
+     * smaller of the two, staging n floats through them overruns the
+     * allocation — a VRAM corruption that would look like a bad kernel. */
+    #define KDA_STAGE(WEIGHT, DST16) do {                                          op_gemv(eng, (WEIGHT), eng->buf_norm, eng->buf_attn_a,                             n, c->hidden);                                                    wisp_gpu_f32_to_f16(eng->buf_attn_a, (DST16), n,                                              eng->compute_stream);                              } while (0)
 
-    /* The recurrence kernel reads fp16; engine activations are fp32. */
-    wisp_gpu_f32_to_f16(eng->buf_attn_a, eng->kda_q16,   n,
-                        eng->compute_stream);
-    wisp_gpu_f32_to_f16(eng->buf_attn_b, eng->kda_k16,   n,
-                        eng->compute_stream);
-    wisp_gpu_f32_to_f16(eng->buf_attn_c, eng->kda_v16,   n,
-                        eng->compute_stream);
-    wisp_gpu_f32_to_f16(eng->buf_gate,   eng->kda_beta16, n,
-                        eng->compute_stream);
-    wisp_gpu_f32_to_f16(eng->buf_up,     eng->kda_gate16, n,
-                        eng->compute_stream);
+    KDA_STAGE(w->q_proj,   eng->kda_q16);
+    KDA_STAGE(w->k_proj,   eng->kda_k16);
+    KDA_STAGE(w->v_proj,   eng->kda_v16);
+    KDA_STAGE(w->kda_beta, eng->kda_beta16);
+    KDA_STAGE(w->kda_gate, eng->kda_gate16);
+    #undef KDA_STAGE
 
+    /* The kernel L2-normalizes q and k itself, so there is nothing to
+     * do here that a caller could get wrong. See kda_attention.cu. */
     size_t slot = (size_t)w->kda_slot * c->n_heads
                   * (size_t)eng->kda_d_k * eng->kda_d_v;
     WISP_CHECK_CUDA(
@@ -1820,8 +1823,10 @@ static WispError alloc_buffers(WispEngine* eng, WispErrCtx* err) {
     cand[2] = c->n_heads * c->v_head_dim;
     cand[3] = c->n_heads * c->kv_lora;
     cand[4] = c->q_lora;
-    cand[5] = (c->attn_type != WISP_ATTN_MLA)
-        ? c->n_heads * c->head_dim : 0;
+    /* Unconditional: a hybrid backbone (Kimi K3 = KDA + Gated MLA)
+     * reports attn_type MLA but still runs n_heads * head_dim through
+     * the projection scratch on its KDA layers. */
+    cand[5] = c->n_heads * c->head_dim;
     for (int i = 0; i < 6; i++) if (cand[i] > max_proj) max_proj = cand[i];
 
     int max_inter = c->moe_inter;

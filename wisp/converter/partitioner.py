@@ -163,15 +163,24 @@ class Partitioner:
                         * len(self.adapter.kda_projection_names))
             print(f"  [WISP] KDA projections mapped: "
                   f"{self._kda_tensors}/{expected}")
-            if self._kda_tensors == 0:
-                print("  [WISP] WARNING: no KDA tensors matched. The "
-                      "checkpoint uses names this adapter does not know; "
-                      "KDA layers will fall back to the GQA path and "
-                      "output will be WRONG. Report the real names at "
-                      "github.com/zeroextub-collab/wisp/issues")
-            elif self._kda_tensors < expected:
-                print(f"  [WISP] WARNING: only {self._kda_tensors} of "
-                      f"{expected} KDA tensors matched — partial mapping.")
+            if self._kda_tensors < expected:
+                kind = ("no KDA tensors matched"
+                        if self._kda_tensors == 0
+                        else f"only {self._kda_tensors} of {expected} "
+                             f"KDA tensors matched")
+                print(f"  [WISP] WARNING: {kind}. The checkpoint spells "
+                      f"these projections in a way this adapter does not "
+                      f"know, so those layers fall back to the GQA path "
+                      f"and the output will be WRONG rather than slow.")
+                print(f"  [WISP] Fix it without editing WISP:")
+                print(f"           wisp inspect --source <shards> "
+                      f"--model kimi-k3")
+                print(f"         then re-run with the names it prints:")
+                print(f"           WISP_KDA_NAMES='{{\"beta\": \"...\"}}' "
+                      f"wisp convert ...")
+                print(f"  [WISP] Reporting them at "
+                      f"github.com/zeroextub-collab/wisp/issues gets them "
+                      f"into the defaults for everyone else.")
         return manifest
 
     # ------------------------------------------------------------------ #

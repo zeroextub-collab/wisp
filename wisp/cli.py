@@ -910,5 +910,97 @@ def doctor(models_dir: str):
         click.echo(f"\n  All checks green — ready to stream. {OK}")
 
 
+# --------------------------------------------------------------------------- #
+@main.command()
+@click.option("--source", required=True, type=click.Path(exists=True),
+              help="Directory of downloaded .safetensors shards.")
+@click.option("--model", "model_ref", default=None,
+              help="Adapter to check the names against (e.g. kimi-k3).")
+@click.option("--layer", default=0, show_default=True,
+              help="Which layer's tensor names to print.")
+def inspect(source: str, model_ref: str | None, layer: int):
+    """Print the tensor names a checkpoint actually uses.
+
+    WISP maps every family onto one canonical layout by NAME, so a
+    checkpoint that spells its projections differently converts into a
+    model that loads cleanly and generates nonsense. This shows the real
+    names so a mismatch is something you can see before spending a
+    multi-hundred-GB download on it.
+
+    For Kimi K3 specifically: if the KDA projections below are not
+    matched, re-run the conversion with the names supplied directly —
+
+        WISP_KDA_NAMES='{"beta": "<real_name>"}' wisp convert ...
+    """
+    from pathlib import Path as _P
+    from safetensors import safe_open
+
+    OK = "✅"
+    shards = sorted(_P(source).glob("*.safetensors"))
+    if not shards:
+        raise click.ClickException(f"No .safetensors shards in {source}")
+
+    prefix = f"model.layers.{layer}."
+    names: list[str] = []
+    for shard in shards:
+        with safe_open(str(shard), framework="pt", device="cpu") as f:
+            names.extend(n for n in f.keys() if n.startswith(prefix))
+        if names:
+            break
+
+    if not names:
+        raise click.ClickException(
+            f"No tensors found for layer {layer} across "
+            f"{len(shards)} shard(s). Try a different --layer.")
+
+    click.echo("")
+    click.echo(f"  Layer {layer} — {len(names)} tensors "
+               f"({len(shards)} shard(s) scanned)")
+    click.echo("")
+
+    adapter = None
+    if model_ref:
+        from .models.registry import get_adapter
+        adapter = get_adapter(model_ref)
+
+    for n in sorted(names):
+        mapped = None
+        if adapter is not None:
+            try:
+                mapped = adapter.canonical_dense_name(n)
+            except Exception:
+                mapped = None
+        leaf = n[len(prefix):]
+        if mapped and ".kda." in mapped:
+            click.echo(f"    {OK} {leaf:<48} -> {mapped}")
+        elif mapped:
+            click.echo(f"      {leaf:<48} -> {mapped}")
+        else:
+            click.echo(f"      {leaf}")
+
+    if adapter is not None and hasattr(adapter, "kda_projection_names"):
+        matched = {
+            adapter.canonical_dense_name(n).rsplit(".", 1)[-1]
+            for n in names
+            if (adapter.canonical_dense_name(n) or "").find(".kda.") >= 0
+        }
+        missing = [p for p in adapter.kda_projection_names
+                   if p not in matched]
+        click.echo("")
+        if not adapter.is_kda_layer(layer):
+            click.echo(f"  Layer {layer} is a Gated MLA layer, not KDA — "
+                       f"try --layer 0.")
+        elif missing:
+            click.echo(f"  Unmatched KDA projections: "
+                       f"{', '.join(missing)}")
+            click.echo(f"  Map them by name and convert again:")
+            example = ", ".join(f'"{m}": "<leaf above>"' for m in missing)
+            click.echo(f"    WISP_KDA_NAMES='{{{example}}}' wisp convert ...")
+        else:
+            click.echo(f"  All {len(adapter.kda_projection_names)} KDA "
+                       f"projections matched. {OK}")
+    click.echo("")
+
+
 if __name__ == "__main__":
     sys.exit(main())

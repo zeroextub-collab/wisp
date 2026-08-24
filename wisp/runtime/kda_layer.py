@@ -3,17 +3,35 @@ wisp.runtime.kda_layer — Kimi Delta Attention as a torch module.
 
 KDA is linear attention with a delta-rule state update. Instead of a KV
 cache that grows with the conversation, each head carries a fixed
-[d_k, d_v] state matrix:
+[d_k, d_v] state matrix S and applies, per token:
 
-    beta_t = sigmoid(W_beta x_t)      per-channel decay, in (0, 1)
-    S_t    = S_{t-1} * (1 - beta_t k_t) + v_t k_t^T
-    o_t    = S_t q_t
-    y_t    = silu(g_t) * o_t          output gate
+    qn = q / ||q||, kn = k / ||k||     L2, per head, over d_k
+    b  = sigmoid(W_beta x)             per-channel write gate, in (0, 1)
+    u  = S^T kn                        what memory currently holds here
+    S  = S + b * kn (v - u)^T          write the PREDICTION ERROR
+    o  = S^T qn                        read, with the new state
+    y  = silu(g) * o                   output gate
 
-The decay term is what makes it a *delta* rule: the state is reduced by
-exactly the amount the incoming key addresses before the new value is
-written, so it corrects rather than accumulates. Plain linear attention
-(S += v k^T) saturates over long contexts; this does not.
+Three properties, each load-bearing:
+
+1. It writes `v - u`, not `v`. That is what makes it a *delta* rule: the
+   state is corrected by exactly the amount it was wrong by, so writing
+   a key that is already stored is a no-op instead of doubling it. Plain
+   linear attention (S += v k^T) accumulates and saturates; this does
+   not. `test_kda_delta_rule_converges` pins the property down directly.
+
+2. q and k are L2-normalized, which bounds the update and keeps the
+   recurrence stable over long contexts. Without it the state diverges
+   to inf within ~200 tokens at moderate input scale, which is exactly
+   the failure the constant-size state exists to avoid.
+
+3. The output is read AFTER the state is written, so a token can see its
+   own value. Reading first makes the first token of every conversation
+   emit exactly zero.
+
+The CUDA kernel normalizes internally rather than trusting its callers,
+so the C engine, the pybind path and this module cannot drift apart;
+`_torch_decode_step` mirrors it line for line and the tests diff the two.
 
 Kimi K3 uses KDA in 69 of its 93 layers, interleaved 3:1 with Gated MLA
 (which WISP already runs through its absorbed-MLA path). Because the
@@ -22,13 +40,14 @@ by sequence length — that is the property the whole design is buying.
 
 Two execution paths, kept arithmetically identical and cross-checked
 against each other by tests/test_kda.py:
-  * CUDA   — csrc/cuda/kda_attention.cu via the pointer bindings
+  * CUDA    — csrc/cuda/kda_attention.cu via the pointer bindings
   * PyTorch — pure-tensor fallback for CPU-only mode
 
-SCOPE: this module and its kernel are complete and tested. K3 end-to-end
-inference additionally needs KDA projection weights in the converted
-model (the converter does not map them yet) and a branch in the C
-forward pass; see the TODOs in wisp/models/kimi_k3.py.
+SCOPE: the kernel, this module, the converter mapping and the C
+forward-pass branch are all in place. What is NOT verified is the K3
+checkpoint's tensor NAMES for the six KDA projections — see
+wisp/models/kimi_k3.py, which matches a list of candidates and makes
+the converter report how many it found.
 """
 
 from __future__ import annotations
@@ -52,6 +71,14 @@ class _RMSNorm(nn.Module):
         xf = x.float()
         xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
         return (xf * self.weight.float()).to(dtype)
+
+
+def _l2_normalize(t: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """Unit-norm over the last (head) dimension.
+
+    The CUDA kernel does this internally, so the fallback must too or the
+    two paths disagree. eps matches KDA_NORM_EPS in kda_attention.cu."""
+    return t * torch.rsqrt(t.pow(2).sum(-1, keepdim=True) + eps)
 
 
 def _core_or_none():
@@ -165,11 +192,25 @@ class KDALayer(nn.Module):
 
     # ------------------------------------------------------------------ #
     def _use_cuda(self, state: torch.Tensor) -> bool:
+        """Both entry points must exist — a build with only one of them
+        would take the CUDA path for decode and the torch path for
+        prefill, and the two would silently disagree."""
         core = _core_or_none()
         return (core is not None
                 and getattr(core, "cuda_enabled", False)
                 and hasattr(core, "kda_decode_step_ptr")
+                and hasattr(core, "kda_prefill_ptr")
                 and state.is_cuda)
+
+    @staticmethod
+    def _check_same_device(state: torch.Tensor, *tensors) -> None:
+        """The kernel takes raw pointers, so a device mismatch is not a
+        type error — it is a silent read of someone else's memory."""
+        for t in tensors:
+            if t.device != state.device:
+                raise ValueError(
+                    f"KDA inputs and state must share a device: got "
+                    f"{t.device} and {state.device}")
 
     def _decode_step(self, q, k, v, beta, gate, state):
         """One token. [B,H,D] in, [B,H,D] out plus the updated state."""
@@ -178,23 +219,31 @@ class KDALayer(nn.Module):
         return self._torch_decode_step(q, k, v, beta, gate, state)
 
     def _torch_decode_step(self, q, k, v, beta, gate, state):
-        """Reference implementation — mirrors kda_decode_step_kernel."""
+        """Reference implementation — mirrors kda_decode_step_kernel.
+
+        Kept in fp32 regardless of the activation dtype: the state is a
+        running accumulator and fp16 drifts over a long context."""
         st = state.float()
-        qf, kf, vf = q.float(), k.float(), v.float()
-        decay = torch.sigmoid(beta.float())
+        qn = _l2_normalize(q.float())
+        kn = _l2_normalize(k.float())
+        vf = v.float()
+        b = torch.sigmoid(beta.float())                       # [B,H,d_k]
 
-        # Output from the state carried in (before this token's update)
-        out = torch.einsum("bhkv,bhk->bhv", st, qf)
+        # u = S^T kn — what memory currently returns for this key.
+        u = torch.einsum("bhkv,bhk->bhv", st, kn)             # [B,H,d_v]
+        err = vf - u
+
+        # Delta rule: write the error, gated per channel.
+        new_state = st + torch.einsum("bhk,bhv->bhkv", b * kn, err)
+
+        # Read AFTER the write, so this token can see its own value.
+        out = torch.einsum("bhkv,bhk->bhv", new_state, qn)
         out = F.silu(gate.float()) * out
-
-        # Delta rule: S = S * (1 - beta*k) + v k^T
-        decay_k = decay * kf                                   # [B,H,d_k]
-        new_state = (st - torch.einsum("bhkv,bhk->bhkv", st, decay_k)
-                     + torch.einsum("bhv,bhk->bhkv", vf, kf))
         return out, new_state
 
     def _cuda_decode_step(self, q, k, v, beta, gate, state):
         core = _core_or_none()
+        self._check_same_device(state, q, k, v, beta, gate)
         B, H, Dk = q.shape
         Dv = v.shape[-1]
 
@@ -231,6 +280,7 @@ class KDALayer(nn.Module):
 
     def _cuda_prefill(self, q, k, v, beta, gate, initial_state):
         core = _core_or_none()
+        self._check_same_device(initial_state, q, k, v, beta, gate)
         B, T, H, Dk = q.shape
         Dv = v.shape[-1]
 

@@ -56,6 +56,8 @@ WHAT THIS MEANS FOR WISP
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .base_adapter import ModelAdapter
 from . import constants as C
 
@@ -177,20 +179,80 @@ class KimiK3Adapter(ModelAdapter):
     # WARNING — these tensor names are NOT verified against released
     # weights. The technical report describes the mechanism, not the
     # checkpoint layout, and no K3 checkpoint has been converted with
-    # this code yet. `kda_tensor_aliases` therefore accepts several
-    # plausible spellings, and `wisp convert` reports exactly which ones
-    # it matched so a mismatch is loud rather than silent.
+    # this code yet. The three layers of defence, in order:
+    #   1. kda_module_names x kda_tensor_aliases — a wide net over the
+    #      spellings published linear-attention checkpoints actually use.
+    #   2. $WISP_KDA_NAMES — an explicit map, so a user whose checkpoint
+    #      falls outside the net converts without patching WISP.
+    #   3. `wisp inspect` prints the real names and marks what matched,
+    #      and `wisp convert` reports its match count and refuses to be
+    #      quiet about a shortfall.
+    # An unmatched projection silently drops that layer onto the GQA
+    # path, so the failure mode is a model that loads, verifies, and
+    # generates nonsense. Everything here exists to make that loud.
     kda_projection_names = ("q_proj", "k_proj", "v_proj", "o_proj",
                             "beta", "gate")
 
+    # Every spelling seen across published linear-attention checkpoints
+    # (DeltaNet, GLA, Gated DeltaNet, RWKV-family, Mamba-style mixers).
+    # Matching is case-insensitive and ignores a leading "w"/"W".
     kda_tensor_aliases = {
-        "beta": ("beta", "beta_proj", "b_proj", "k_b", "decay_proj"),
-        "gate": ("gate", "gate_proj", "g_proj", "wq_b", "output_gate"),
-        "q_proj": ("q_proj", "wq", "wq_a", "q_a_proj"),
-        "k_proj": ("k_proj", "wk"),
-        "v_proj": ("v_proj", "wv"),
-        "o_proj": ("o_proj", "wo", "out_proj"),
+        "q_proj": ("q_proj", "wq", "wq_a", "q_a_proj", "query_proj",
+                   "q", "to_q"),
+        "k_proj": ("k_proj", "wk", "wk_a", "k_a_proj", "key_proj",
+                   "k", "to_k"),
+        "v_proj": ("v_proj", "wv", "wv_a", "v_a_proj", "value_proj",
+                   "v", "to_v"),
+        "o_proj": ("o_proj", "wo", "out_proj", "output_proj", "proj_out",
+                   "to_out", "dense"),
+        "beta": ("beta", "beta_proj", "b_proj", "k_b", "decay_proj",
+                 "decay", "a_proj", "alpha_proj", "forget_proj",
+                 "f_proj", "dt_proj", "w_beta"),
+        "gate": ("gate", "gate_proj", "g_proj", "wq_b", "output_gate",
+                 "out_gate", "g", "to_gate"),
     }
+
+    # The module that holds them. K3's own name is unknown; these are the
+    # names linear-attention blocks actually ship under.
+    kda_module_names = ("attention", "self_attn", "attn", "linear_attn",
+                        "linear_attention", "kda", "mixer", "token_mixer",
+                        "delta_net", "deltanet", "seq_mixer")
+
+    @classmethod
+    def kda_name_overrides(cls) -> dict:
+        """User-supplied name map, from $WISP_KDA_NAMES.
+
+        The escape hatch for the case this adapter cannot guess: when the
+        real checkpoint spells its projections in a way none of the
+        aliases above cover, a user can convert without patching WISP.
+        Accepts inline JSON or a path to a JSON file, mapping canonical
+        name -> checkpoint leaf name:
+
+            WISP_KDA_NAMES='{"beta": "w_decay", "gate": "w_gate"}'
+
+        `wisp inspect <model_dir>` prints the leaf names actually present,
+        which is where the right-hand side comes from.
+        """
+        import json
+        import os
+        raw = os.environ.get("WISP_KDA_NAMES", "").strip()
+        if not raw:
+            return {}
+        try:
+            if not raw.startswith("{"):
+                raw = Path(raw).read_text(encoding="utf-8")
+            mapping = json.loads(raw)
+            if not isinstance(mapping, dict):
+                raise ValueError("expected a JSON object")
+            unknown = set(mapping) - set(cls.kda_projection_names)
+            if unknown:
+                raise ValueError(
+                    f"unknown KDA projection(s) {sorted(unknown)}; "
+                    f"valid keys: {list(cls.kda_projection_names)}")
+            return {k: str(v) for k, v in mapping.items()}
+        except Exception as e:
+            raise ValueError(
+                f"WISP_KDA_NAMES is not usable: {e}") from e
 
     def canonical_dense_name(self, hf_name: str) -> str | None:
         """
@@ -200,18 +262,50 @@ class KimiK3Adapter(ModelAdapter):
         attention matrix — so they ride in dense/model_dense.safetensors
         beside everything else rather than in a parallel directory. That
         keeps one loader, one file, one format.
+
+        Matching is deliberately generous: an unmatched KDA projection
+        does not fail loudly at load time, it silently drops the layer
+        onto the GQA path and produces fluent nonsense. Better to accept
+        a name that turns out to be something else — that shows up as a
+        shape mismatch, which is loud.
         """
         import re as _re
         m = _re.match(
-            r"model\.layers\.(\d+)\.(?:attention|self_attn)\.(.+?)"
+            r"model\.layers\.(\d+)\.([A-Za-z_0-9]+)\.(.+?)"
             r"(?:\.weight)?$", hf_name)
-        if m:
-            layer, leaf = int(m.group(1)), m.group(2)
-            if self.is_kda_layer(layer):
-                for canonical, aliases in self.kda_tensor_aliases.items():
-                    if leaf in aliases:
-                        return f"layers.{layer}.kda.{canonical}"
+        if not m:
+            return super().canonical_dense_name(hf_name)
+
+        layer, module, leaf = int(m.group(1)), m.group(2), m.group(3)
+        if (module.lower() not in self.kda_module_names
+                or not self.is_kda_layer(layer)):
+            return super().canonical_dense_name(hf_name)
+
+        canonical = self._match_kda_leaf(leaf)
+        if canonical:
+            return f"layers.{layer}.kda.{canonical}"
         return super().canonical_dense_name(hf_name)
+
+    @classmethod
+    def _match_kda_leaf(cls, leaf: str) -> str | None:
+        """Canonical projection name for a checkpoint leaf, or None.
+
+        Order matters: an explicit override always wins, so a user can
+        correct a wrong guess as well as supply a missing one."""
+        overrides = cls.kda_name_overrides()
+        norm = leaf.lower().strip(". ")
+        for canonical, want in overrides.items():
+            if norm == want.lower().strip(". "):
+                return canonical
+        # Overridden projections are claimed by the override alone —
+        # otherwise an alias could re-match the name the user replaced.
+        for canonical, aliases in cls.kda_tensor_aliases.items():
+            if canonical in overrides:
+                continue
+            for alias in aliases:
+                if norm == alias or norm == "w" + alias:
+                    return canonical
+        return None
 
     def manifest_extras(self) -> dict:
         """Recorded in manifest.json so the engine knows, per layer,

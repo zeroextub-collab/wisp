@@ -2,7 +2,7 @@
 
 > Stream what shouldn't run.
 
-[![Tests](https://img.shields.io/badge/tests-177%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-197%20passing-brightgreen)]()
 [![CUDA](https://img.shields.io/badge/CUDA-12.0%2B%20%7C%2013.x-76b900)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
@@ -117,23 +117,41 @@ cache that grows with the conversation, each head carries a fixed
 `[d_k, d_v]` state matrix updated by a delta rule:
 
 ```
-beta_t = sigmoid(W_beta x_t)          per-channel decay
-S_t    = S_{t-1} * (1 - beta_t k_t) + v_t k_t^T
-o_t    = S_t q_t                      output, then a SiLU gate
+qn, kn = q/||q||, k/||k||     L2-normalized per head
+b      = sigmoid(W_beta x)    per-channel write gate, in (0,1)
+u      = S^T kn               what memory currently holds at this key
+S      = S + b * kn (v - u)^T write the PREDICTION ERROR
+o      = S^T qn               read, using the new state
+y      = silu(g) * o          output gate
 ```
 
-The decay term is what makes it a *delta* rule: the state is reduced by
-exactly the amount the incoming key addresses before the new value is
-written, so it corrects rather than accumulates. Plain linear attention
-(`S += v k^T`) saturates over long contexts; this does not. Cost is
-O(n) in sequence length and **memory is constant** — that is the
+Three details carry the whole thing:
+
+**It writes `v - u`, not `v`.** That is what makes it a *delta* rule —
+the state is corrected by exactly the amount it was wrong by, so
+re-writing a key that is already stored is a no-op instead of doubling
+it. Plain linear attention (`S += v k^T`) accumulates and saturates.
+
+**q and k are L2-normalized**, which bounds the update. Without it the
+state diverges: measured at `inf` within 200 tokens at moderate input
+scale. A constant-size state is worthless if its contents blow up.
+
+**The read happens after the write**, so a token can see its own value.
+Reading first makes the first token of every conversation emit exactly
+zero.
+
+Cost is O(n) in sequence length and **memory is constant** — that is the
 property that makes 1M-token context tractable at all.
 
 WISP implements KDA as a CUDA kernel with a matching pure-PyTorch
-fallback for CPU-only mode; tests assert the two agree numerically, that
-prefill lands on the same state as sequential decode, and that the state
-size is unchanged after 1,000 tokens. The other 24 K3 layers are Gated
-MLA and already run through WISP's absorbed-MLA path.
+fallback for CPU-only mode. The kernel normalizes internally rather than
+trusting its callers, so the C engine, the Python bindings and the
+fallback cannot drift apart. Tests assert the two paths agree
+numerically, that prefill lands on the same state as sequential decode,
+that repeated writes converge on the stored value, that the state stays
+bounded over 2,000 tokens, and that batch entries do not contaminate
+each other. The other 24 K3 layers are Gated MLA and already run through
+WISP's absorbed-MLA path.
 
 **Status — read this before converting K3.** The kernel is implemented
 and numerically verified, the converter maps KDA projections into the
@@ -141,10 +159,26 @@ dense weight file, and the C engine takes a per-layer KDA branch when
 those projections load. What is *not* verified is the checkpoint's
 tensor NAMES: the technical report describes the mechanism, not the
 layout, and no K3 checkpoint has been converted with this code yet.
-`wisp convert` prints how many KDA projections it matched — if that
-number is 0 or partial, those layers fall back to the GQA path and the
-output will be wrong rather than merely slow. If you hit that, the real
-names in an issue are the single most useful thing you can send.
+
+So the names are a wide net plus an escape hatch rather than a guess:
+
+```bash
+wisp inspect --source ./k3-shards --model kimi-k3
+```
+
+prints the tensor names the checkpoint actually uses and marks which
+KDA projections matched. If any are unmatched, map them by hand and
+convert without patching WISP:
+
+```bash
+WISP_KDA_NAMES='{"beta": "<real_name>"}' wisp convert --model kimi-k3 ...
+```
+
+`wisp convert` also reports its match count and refuses to be quiet
+about a shortfall — an unmatched projection drops that layer onto the
+GQA path, and the output is wrong rather than merely slow. Sending the
+real names to the issue tracker gets them into the defaults for
+everyone else.
 
 ### Double-Buffer Async Pipeline
 
@@ -408,6 +442,10 @@ wisp doctor
 # Show tier allocation for your hardware (works pre-download)
 wisp info --model glm-5.2
 
+# Print the tensor names a checkpoint actually uses, and which of them
+# WISP matched (use before converting an unreleased/unverified model)
+wisp inspect --source ./shards --model kimi-k3
+
 # Verify model integrity, expert file by expert file
 wisp verify --model ./models/glm-5.2/
 
@@ -537,7 +575,7 @@ changes.
 - Real DeepSeek-V3 benchmark numbers
 - Warm/hot steady-state Mixtral numbers (long runs)
 - A Kimi K3 conversion against real weights, to confirm the KDA
-  tensor names WISP currently infers
+  tensor names WISP currently infers (`wisp inspect` prints them)
 - A DGX Spark run, to replace the unified-mode projections
 
 ### Shipped since v1.0
@@ -548,7 +586,8 @@ changes.
 
 ### v2.0 — current release
 - [x] Kimi K3 KDA wired end to end (converter mapping + C forward-pass
-      branch; tensor names still unverified — see the table note)
+      branch; tensor names still unverified — `wisp inspect` and
+      `WISP_KDA_NAMES` exist so that is fixable without a code change)
 - [x] Qwen3-235B-A22B and Qwen3-2.4T adapters, config-driven
 - [x] Desktop GUI (`wisp-gui`)
 - [x] DGX Spark unified-memory detection and tier mode

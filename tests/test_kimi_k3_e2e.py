@@ -209,3 +209,88 @@ def test_kimi_k3_convert_not_calendar_blocked(tmp_path):
     result = CliRunner().invoke(
         main, ["convert", "--model", "kimi-k3", "--output", str(tmp_path)])
     assert "July 27" not in result.output
+
+
+# --------------------------------------------------------------------------
+# Tensor-name matching. No K3 checkpoint has been converted with this code,
+# so the names are inferred. These tests cover the two things that have to
+# hold regardless of what the real names turn out to be: a wide net by
+# default, and a way to correct it without editing WISP.
+# --------------------------------------------------------------------------
+
+import os
+
+import pytest
+
+from wisp.models.kimi_k3 import KimiK3Adapter
+
+
+@pytest.fixture(autouse=True)
+def _clear_kda_override():
+    """WISP_KDA_NAMES is read from the environment, so a leaked value
+    would silently change what later tests match."""
+    saved = os.environ.pop("WISP_KDA_NAMES", None)
+    yield
+    os.environ.pop("WISP_KDA_NAMES", None)
+    if saved is not None:
+        os.environ["WISP_KDA_NAMES"] = saved
+
+
+@pytest.mark.parametrize("hf_name,expected", [
+    ("model.layers.0.self_attn.q_proj.weight",        "q_proj"),
+    ("model.layers.0.linear_attn.beta_proj.weight",   "beta"),
+    ("model.layers.1.kda.wo.weight",                  "o_proj"),
+    ("model.layers.2.token_mixer.output_gate.weight", "gate"),
+    ("model.layers.4.mixer.dt_proj.weight",           "beta"),
+    ("model.layers.5.delta_net.to_v.weight",          "v_proj"),
+])
+def test_kda_name_variants_all_map(hf_name, expected):
+    """One module name and one spelling is a guess; a list of them is a
+    net. Every variant here appears in a published linear-attention
+    checkpoint."""
+    got = KimiK3Adapter().canonical_dense_name(hf_name)
+    assert got is not None and got.endswith(f".kda.{expected}"), got
+
+
+def test_kda_mapping_skips_mla_layers():
+    """Layer 3 is Gated MLA. Mapping its q_proj onto the KDA path would
+    route a global-attention layer through linear attention — the model
+    would load and be quietly wrong."""
+    got = KimiK3Adapter().canonical_dense_name(
+        "model.layers.3.self_attn.q_proj.weight")
+    assert got is None or ".kda." not in got
+
+
+def test_kda_name_override_rescues_unknown_names():
+    """The escape hatch: a checkpoint whose names WISP cannot guess still
+    converts, without anyone editing the adapter."""
+    a = KimiK3Adapter()
+    unknown = "model.layers.0.seq_mixer.lambda_proj.weight"
+    assert a.canonical_dense_name(unknown) is None
+
+    os.environ["WISP_KDA_NAMES"] = '{"beta": "lambda_proj"}'
+    assert a.canonical_dense_name(unknown) == "layers.0.kda.beta"
+
+
+def test_kda_name_override_wins_over_a_wrong_guess():
+    """An override must be able to CORRECT a default, not just add to it.
+    `gate` is a default alias for the gate projection; pointing `beta` at
+    it has to win, or a user cannot fix a mis-guess."""
+    os.environ["WISP_KDA_NAMES"] = '{"beta": "gate"}'
+    got = KimiK3Adapter().canonical_dense_name(
+        "model.layers.0.self_attn.gate.weight")
+    assert got == "layers.0.kda.beta", got
+
+
+def test_kda_bad_override_raises_rather_than_being_ignored():
+    """A typo in the override must not silently degrade to 'no mapping' —
+    that is the exact failure the override exists to prevent."""
+    os.environ["WISP_KDA_NAMES"] = '{"nonsense": "x"}'
+    with pytest.raises(ValueError, match="unknown KDA projection"):
+        KimiK3Adapter().canonical_dense_name(
+            "model.layers.0.self_attn.q_proj.weight")
+
+    os.environ["WISP_KDA_NAMES"] = "{not json"
+    with pytest.raises(ValueError, match="not usable"):
+        KimiK3Adapter().canonical_dense_name(
+            "model.layers.0.self_attn.q_proj.weight")
