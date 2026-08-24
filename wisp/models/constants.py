@@ -128,9 +128,10 @@ ATTENTION_TYPE: dict[str, str] = {
     "glm52":       "MLA",
     "deepseek_v3": "MLA",
     "deepseek_r1": "MLA",
-    # KDA (Kimi Delta Attention) — CONFIRMED. Hybrid linear attention;
-    # runs as a GQA placeholder in the engine until the July 27 tech
-    # report publishes the full mechanism.
+    # KDA (Kimi Delta Attention) — CONFIRMED. Hybrid linear attention,
+    # implemented in csrc/cuda/kda_attention.cu; the engine takes the KDA
+    # path per layer when the checkpoint's KDA projections load, and
+    # falls back to GQA when they do not.
     "kimi_k3":     "KDA",
     "mixtral_8x7b":  "GQA",   # 32 query heads / 8 KV heads
     "mixtral_8x22b": "GQA",   # 48 query heads / 8 KV heads

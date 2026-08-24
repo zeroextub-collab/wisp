@@ -71,7 +71,8 @@ def print_startup_display(profile: SystemProfile, adapter,
     click.echo("")
     if adapter.family == "kimi_k3":
         # Architecture CONFIRMED by the technical report (arXiv:2607.24653).
-        # What is still missing is WISP's KDA kernel, not the numbers.
+        # Kernel + converter mapping are in; tensor NAMES are the last
+        # unverified piece and only real weights can settle them.
         active_b = adapter.active_parameters_per_token // 1_000_000_000
         click.echo("  Model : Kimi K3 (2.8T total / "
                    f"{active_b}B active, int4)")
@@ -84,11 +85,16 @@ def print_startup_display(profile: SystemProfile, adapter,
         click.echo(f"    Attention   : {adapter.attention_pattern}")
         click.echo("                  75% KDA / 25% Gated MLA "
                    "(confirmed arXiv:2607.24653)")
+        click.echo("                  KDA kernel implemented; converter "
+                   "maps the projections")
         click.echo(click.style(
-            "    NOTE: WISP has no KDA kernel yet — K3 layers currently "
-            "run the GQA", fg="yellow"))
+            "    NOTE: KDA tensor names are unverified against released "
+            "weights — if", fg="yellow"))
         click.echo(click.style(
-            "          placeholder and will NOT produce correct output.",
+            "          `wisp convert` reports 0 KDA projections mapped, "
+            "those layers fall", fg="yellow"))
+        click.echo(click.style(
+            "          back to GQA and output will be wrong.",
             fg="yellow"))
     else:
         click.echo(f"  Model : {adapter.name} "
@@ -216,11 +222,17 @@ def convert(model_name: str, output_dir: str, quant: str,
 
     adapter = get_adapter(model_name)
     if adapter.family == "kimi_k3":
-        raise click.ClickException(
-            "Kimi K3 weights drop July 27 — conversion unlocks when "
-            "Moonshot publishes them alongside the technical report. "
-            "Until then `wisp info --model kimi-k3` shows the planned "
-            "tier split for your hardware.")
+        # Weights and the technical report are both public now, so the
+        # date guard is gone. What is still unverified is the KDA tensor
+        # NAMING — say so before someone spends a 1.4TB download finding
+        # out. The converter reports how many projections matched.
+        click.echo(click.style(
+            "  NOTE: K3 KDA projection names are not yet verified against "
+            "released weights.\n"
+            "  wisp convert reports how many matched; if it reports 0, "
+            "KDA layers fall back\n"
+            "  to the GQA path and output will be wrong. Please open an "
+            "issue with the real names.", fg="yellow"))
 
     out = Path(output_dir) / model_name.lower()
     out_root = Path(output_dir)

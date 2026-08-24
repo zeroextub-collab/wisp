@@ -30,7 +30,7 @@ and your NVMe SSD in real time.
 | DeepSeek-R1 | 671B | 37B | 464 | ~340 GB | ✅ Ready |
 | Mixtral-8x7B | 47B | 13B | 64 | 26.6 GB* | ✅ **Verified end-to-end** |
 | Mixtral-8x22B | 141B | 39B | 112 | ~90 GB | ✅ Ready |
-| Kimi K3 | 2.8T | 104B | 1,488 | ~1.4 TB | ⏳ KDA in progress |
+| Kimi K3 | 2.8T | 104B | 1,488 | ~1.4 TB | ⚠️ KDA wired, names unverified |
 | Qwen3.8 | 2.4T | TBD | TBD | ~1.2TB est. | ⏳ Weights soon |
 
 *Measured from a real conversion — every expert file verified.
@@ -107,10 +107,16 @@ prefill lands on the same state as sequential decode, and that the state
 size is unchanged after 1,000 tokens. The other 24 K3 layers are Gated
 MLA and already run through WISP's absorbed-MLA path.
 
-**Status:** the kernel and layer are complete and tested. Running K3
-end-to-end additionally needs KDA projection weights in the converted
-model (the converter does not map them yet) and a branch in the C
-forward pass — that is what "KDA in progress" means in the table above.
+**Status — read this before converting K3.** The kernel is implemented
+and numerically verified, the converter maps KDA projections into the
+dense weight file, and the C engine takes a per-layer KDA branch when
+those projections load. What is *not* verified is the checkpoint's
+tensor NAMES: the technical report describes the mechanism, not the
+layout, and no K3 checkpoint has been converted with this code yet.
+`wisp convert` prints how many KDA projections it matched — if that
+number is 0 or partial, those layers fall back to the GQA path and the
+output will be wrong rather than merely slow. If you hit that, the real
+names in an issue are the single most useful thing you can send.
 
 ### Double-Buffer Async Pipeline
 

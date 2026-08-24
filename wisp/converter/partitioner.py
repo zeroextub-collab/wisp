@@ -108,6 +108,7 @@ class Partitioner:
         self._dense: dict[str, torch.Tensor] = {}
         self._experts_written = 0
         self._expert_bytes = 0
+        self._kda_tensors = 0
         self._dropped: list[str] = []
 
     # ------------------------------------------------------------------ #
@@ -154,6 +155,23 @@ class Partitioner:
         if self._dropped:
             print(f"  [WISP] Dropped {len(self._dropped)} non-weight tensors "
                   f"(rotary buffers etc.)")
+        if hasattr(self.adapter, "is_kda_layer"):
+            # Loud on mismatch: KDA tensor names are unverified against
+            # released weights, so silence here would mean the engine
+            # quietly falls back to GQA and produces wrong output.
+            expected = (self.adapter.num_kda_layers
+                        * len(self.adapter.kda_projection_names))
+            print(f"  [WISP] KDA projections mapped: "
+                  f"{self._kda_tensors}/{expected}")
+            if self._kda_tensors == 0:
+                print("  [WISP] WARNING: no KDA tensors matched. The "
+                      "checkpoint uses names this adapter does not know; "
+                      "KDA layers will fall back to the GQA path and "
+                      "output will be WRONG. Report the real names at "
+                      "github.com/zeroextub-collab/wisp/issues")
+            elif self._kda_tensors < expected:
+                print(f"  [WISP] WARNING: only {self._kda_tensors} of "
+                      f"{expected} KDA tensors matched — partial mapping.")
         return manifest
 
     # ------------------------------------------------------------------ #
@@ -177,6 +195,8 @@ class Partitioner:
                 if canonical is not None:
                     self._dense[canonical] = (
                         f.get_tensor(name).to(torch.float16).contiguous())
+                    if ".kda." in canonical:
+                        self._kda_tensors += 1
                 else:
                     self._dropped.append(name)
         self._flush_complete_experts()

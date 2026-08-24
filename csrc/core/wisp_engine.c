@@ -714,6 +714,20 @@ static void op_kv_append(WispEngine* e, wisp_half* K, wisp_half* V,
              cpu_kv_append(K, V, k, v, pos, kv_heads, k_dim, v_dim));
 }
 
+/* fp16 -> fp32 for the KDA path (CPU build converts on the host). */
+static void op_half_to_f32(WispEngine* e, const wisp_half* src,
+                           float* dst, int n) {
+#ifndef WISP_NO_CUDA
+    if (e->use_gpu) {
+        wisp_gpu_f16_to_f32(src, dst, n, e->compute_stream);
+        return;
+    }
+#endif
+    (void)e;
+    for (int i = 0; i < n; i++)
+        dst[i] = halfbits_to_float(src, (size_t)i);
+}
+
 /* Device/host memory helpers — "device" means host memory when !use_gpu. */
 static void* eng_alloc(WispEngine* e, size_t n, WispErrCtx* err) {
     void* p = NULL;
@@ -1175,11 +1189,74 @@ static wisp_half* kv_v_layer(WispKVCache* kv, int layer) {
     return kv->v_base + (size_t)layer * kv->v_layer_stride;
 }
 
+/* ---------------------------------------------------------------------
+ * KDA — Kimi Delta Attention (linear attention, constant-size state).
+ *
+ * Only reached for layers the manifest marks KDA *and* whose beta/gate
+ * projections actually loaded; see load_dense(). Standard families never
+ * enter here, so this cannot regress GLM/DeepSeek/Mixtral.
+ *
+ * Unlike the KV-cache paths, nothing is appended to kv — the recurrent
+ * state IS the memory, and it does not grow with the conversation.
+ * ------------------------------------------------------------------- */
+#ifndef WISP_NO_CUDA
+static WispError run_kda_attention(WispEngine* eng, int layer,
+                                   WispErrCtx* err) {
+    WispModelConfig* c = &eng->cfg;
+    WispLayerWeights* w = &eng->layers[layer];
+    int hd = c->head_dim > 0 ? c->head_dim
+                             : c->hidden / (c->n_heads > 0 ? c->n_heads : 1);
+    int n = c->n_heads * hd;
+
+    /* Project: q, k, v, beta (decay), gate (SiLU output gate) */
+    op_gemv(eng, w->q_proj,   eng->buf_norm, eng->buf_attn_a, n, c->hidden);
+    op_gemv(eng, w->k_proj,   eng->buf_norm, eng->buf_attn_b, n, c->hidden);
+    op_gemv(eng, w->v_proj,   eng->buf_norm, eng->buf_attn_c, n, c->hidden);
+    op_gemv(eng, w->kda_beta, eng->buf_norm, eng->buf_gate,   n, c->hidden);
+    op_gemv(eng, w->kda_gate, eng->buf_norm, eng->buf_up,     n, c->hidden);
+
+    /* The recurrence kernel reads fp16; engine activations are fp32. */
+    wisp_gpu_f32_to_f16(eng->buf_attn_a, eng->kda_q16,   n,
+                        eng->compute_stream);
+    wisp_gpu_f32_to_f16(eng->buf_attn_b, eng->kda_k16,   n,
+                        eng->compute_stream);
+    wisp_gpu_f32_to_f16(eng->buf_attn_c, eng->kda_v16,   n,
+                        eng->compute_stream);
+    wisp_gpu_f32_to_f16(eng->buf_gate,   eng->kda_beta16, n,
+                        eng->compute_stream);
+    wisp_gpu_f32_to_f16(eng->buf_up,     eng->kda_gate16, n,
+                        eng->compute_stream);
+
+    size_t slot = (size_t)w->kda_slot * c->n_heads
+                  * (size_t)eng->kda_d_k * eng->kda_d_v;
+    WISP_CHECK_CUDA(
+        wisp_kda_decode_step(eng->kda_state + slot,
+                             eng->kda_q16, eng->kda_k16, eng->kda_v16,
+                             eng->kda_beta16, eng->kda_gate16,
+                             eng->kda_out16,
+                             /*batch=*/1, c->n_heads, eng->kda_d_k,
+                             eng->kda_d_v, eng->compute_stream),
+        err);
+
+    /* Back to fp32 for the output projection. */
+    op_half_to_f32(eng, eng->kda_out16, eng->buf_attn_a, n);
+    op_gemv(eng, w->o_proj, eng->buf_attn_a, eng->buf_attn_out,
+            c->hidden, n);
+    return WISP_OK;
+}
+#endif
+
 static WispError run_attention(WispEngine* eng, int layer, WispKVCache* kv,
                                WispErrCtx* err) {
     WispModelConfig* c = &eng->cfg;
     WispLayerWeights* w = &eng->layers[layer];
     int pos = kv->len;   /* the token being processed sits at this index  */
+
+#ifndef WISP_NO_CUDA
+    /* Hybrid backbones (Kimi K3): this layer may be linear attention. */
+    if (w->is_kda_layer && eng->kda_state && eng->use_gpu)
+        return run_kda_attention(eng, layer, err);
+#endif
 
     if (c->attn_type == WISP_ATTN_MLA) {
         int qs = c->qk_nope + c->qk_rope;
@@ -1674,6 +1751,45 @@ static WispError load_dense(WispEngine* eng, WispErrCtx* err) {
         w->shared_inter = srows > 0 ? srows : eng->cfg.shared_inter;
         w->is_dense_mlp = (w->router == NULL);
 
+        /* KDA projections (hybrid backbones). A layer only counts as KDA
+         * when BOTH extra projections are present — a half-mapped
+         * checkpoint silently degrades to the standard attention path
+         * rather than dereferencing NULL. */
+        snprintf(name, sizeof(name), "layers.%d.kda.beta", i);
+        w->kda_beta = load_tensor(eng, &st, name, NULL, err);
+        snprintf(name, sizeof(name), "layers.%d.kda.gate", i);
+        w->kda_gate = load_tensor(eng, &st, name, NULL, err);
+        if (err->code != WISP_OK) { st_close(&st); return err->code; }
+        w->is_kda_layer = (w->kda_beta != NULL && w->kda_gate != NULL);
+        if (w->is_kda_layer) {
+            w->kda_slot = eng->kda_layer_count++;
+            /* KDA layers carry their own q/k/v under kda.* — fall back to
+             * the standard names when the checkpoint shares them. */
+            if (!w->q_proj) {
+                snprintf(name, sizeof(name), "layers.%d.kda.q_proj", i);
+                w->q_proj = load_tensor(eng, &st, name, NULL, err);
+            }
+            if (!w->k_proj) {
+                snprintf(name, sizeof(name), "layers.%d.kda.k_proj", i);
+                w->k_proj = load_tensor(eng, &st, name, NULL, err);
+            }
+            if (!w->v_proj) {
+                snprintf(name, sizeof(name), "layers.%d.kda.v_proj", i);
+                w->v_proj = load_tensor(eng, &st, name, NULL, err);
+            }
+            if (!w->o_proj) {
+                snprintf(name, sizeof(name), "layers.%d.kda.o_proj", i);
+                w->o_proj = load_tensor(eng, &st, name, NULL, err);
+            }
+            if (err->code != WISP_OK) { st_close(&st); return err->code; }
+            if (!w->q_proj || !w->k_proj || !w->v_proj) {
+                /* Cannot run the recurrence without them; degrade rather
+                 * than crash, and say so once. */
+                w->is_kda_layer = 0;
+                eng->kda_layer_count--;
+            }
+        }
+
         if (!w->input_norm || !w->post_norm || !w->o_proj) {
             st_close(&st);
             WISP_ERR_SET(err, WISP_ERR_MODEL,
@@ -1897,6 +2013,43 @@ WispEngine* wisp_engine_create(const char* model_path,
     if (load_dense(eng, err) != WISP_OK) goto fail;
     if (alloc_buffers(eng, err) != WISP_OK) goto fail;
 
+#ifndef WISP_NO_CUDA
+    /* KDA recurrent state + fp16 staging, sized from the layers that
+     * actually loaded KDA weights. Constant in sequence length. */
+    if (eng->use_gpu && eng->kda_layer_count > 0) {
+        int hd = eng->cfg.head_dim > 0 ? eng->cfg.head_dim
+                 : eng->cfg.hidden / (eng->cfg.n_heads > 0
+                                      ? eng->cfg.n_heads : 1);
+        eng->kda_d_k = hd;
+        eng->kda_d_v = hd;
+        void* st_ptr = NULL;
+        cudaError_t ce = wisp_kda_alloc_state(
+            &st_ptr, 1, eng->cfg.n_heads, hd, hd, eng->kda_layer_count);
+        if (ce != cudaSuccess) {
+            WISP_ERR_SET(err, WISP_ERR_OOM,
+                         "KDA state alloc failed (%d layers x %d heads x "
+                         "%dx%d): %s", eng->kda_layer_count,
+                         eng->cfg.n_heads, hd, hd, cudaGetErrorString(ce));
+            goto fail;
+        }
+        eng->kda_state = (float*)st_ptr;
+
+        size_t stage = (size_t)eng->cfg.n_heads * hd * sizeof(wisp_half);
+        eng->kda_q16 = (wisp_half*)eng_alloc(eng, stage, err);
+        eng->kda_k16 = (wisp_half*)eng_alloc(eng, stage, err);
+        eng->kda_v16 = (wisp_half*)eng_alloc(eng, stage, err);
+        eng->kda_beta16 = (wisp_half*)eng_alloc(eng, stage, err);
+        eng->kda_gate16 = (wisp_half*)eng_alloc(eng, stage, err);
+        eng->kda_out16 = (wisp_half*)eng_alloc(eng, stage, err);
+        if (!eng->kda_out16) goto fail;
+        fprintf(stderr, "  [WISP] KDA: %d linear-attention layers active "
+                        "(state %.1f MB, constant in context length)\n",
+                eng->kda_layer_count,
+                wisp_kda_state_bytes(1, eng->cfg.n_heads, hd, hd,
+                                     eng->kda_layer_count) / 1e6);
+    }
+#endif
+
     /* Scratch ring for churn-free serving of cool experts */
     if (eng->experts_on_gpu) {
         eng->scratch_slots = eng->cfg.top_k + 2;
@@ -1971,6 +2124,12 @@ void wisp_engine_destroy(WispEngine* eng) {
     }
     free(eng->expert_meta);
     free(eng->access_log);
+#ifndef WISP_NO_CUDA
+    if (eng->kda_state) wisp_kda_free_state(eng->kda_state);
+    eng_free(eng, eng->kda_q16);   eng_free(eng, eng->kda_k16);
+    eng_free(eng, eng->kda_v16);   eng_free(eng, eng->kda_beta16);
+    eng_free(eng, eng->kda_gate16); eng_free(eng, eng->kda_out16);
+#endif
 
     eng_free(eng, eng->buf_x);        eng_free(eng, eng->buf_norm);
     eng_free(eng, eng->buf_attn_a);   eng_free(eng, eng->buf_attn_b);
@@ -2056,8 +2215,18 @@ void wisp_kv_cache_free(WispEngine* eng, WispKVCache* kv) {
 }
 
 void wisp_kv_cache_clear(WispEngine* eng, WispKVCache* kv) {
-    (void)eng;
     if (kv) kv->len = 0;
+#ifndef WISP_NO_CUDA
+    /* KDA carries its history in the recurrent state, not the KV cache —
+     * clearing one without the other would leak the previous
+     * conversation into the next one. */
+    if (eng && eng->kda_state && eng->kda_layer_count > 0)
+        wisp_kda_reset_state(eng->kda_state, 1, eng->cfg.n_heads,
+                             eng->kda_d_k, eng->kda_d_v,
+                             eng->kda_layer_count, eng->compute_stream);
+#else
+    (void)eng;
+#endif
 }
 
 void wisp_kv_cache_rollback(WispEngine* eng, WispKVCache* kv, int n_tokens) {

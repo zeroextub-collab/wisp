@@ -104,6 +104,10 @@ class ModelManifest:
               architecture_extra: dict | None = None,
               mtp_available: bool | None = None) -> "ModelManifest":
         """Construct a manifest from an adapter + conversion settings."""
+        extras = {}
+        if hasattr(adapter, "manifest_extras"):
+            extras = adapter.manifest_extras() or {}
+
         arch = {
             "attention_type":                 adapter.attention_type,
             "num_layers":                     adapter.num_layers,
@@ -116,6 +120,7 @@ class ModelManifest:
         }
         if architecture_extra:
             arch.update(architecture_extra)
+        arch.update(extras)
 
         drafter_cfg = adapter.get_drafter_config()
         native = adapter.has_native_mtp if mtp_available is None else mtp_available
@@ -145,6 +150,12 @@ class ModelManifest:
                 "expert_naming": EXPERT_NAMING,
                 "tokenizer_dir": "tokenizer/",
                 "config":        "config.json",
+                # Hybrid-attention families (Kimi K3) keep their KDA
+                # projections here too: they are dense per-layer weights
+                # like any attention matrix, so they ride in the same
+                # safetensors file rather than a parallel directory.
+                # One loader, one format.
+                "kda_weights_dir": "dense/",
             },
             mtp              = {
                 "available":       native,

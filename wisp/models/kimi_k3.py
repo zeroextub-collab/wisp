@@ -150,6 +150,86 @@ class KimiK3Adapter(ModelAdapter):
     def mtp_k(self) -> int:
         return 3
 
+    # ------------------------------------------------------------------ #
+    # Hybrid layer dispatch
+    # ------------------------------------------------------------------ #
+    def layer_type(self, layer_idx: int) -> str:
+        """
+        "kda" or "gated_mla" for a given layer.
+
+        23 blocks of [KDA, KDA, KDA, Gated MLA] plus one final Gated MLA,
+        so the last layer is always global attention: 69 KDA + 24 MLA
+        over 93 layers (CONFIRMED, arXiv:2607.24653). Shares its
+        definition with wisp.runtime.kda_layer.KDALayer.is_kda_layer so
+        the converter and the runtime can never disagree.
+        """
+        from ..runtime.kda_layer import KDALayer
+        return ("kda" if KDALayer.is_kda_layer(layer_idx, self.num_layers)
+                else "gated_mla")
+
+    def is_kda_layer(self, layer_idx: int) -> bool:
+        return self.layer_type(layer_idx) == "kda"
+
+    # Projections a KDA layer needs beyond the usual q/k/v/o. `beta` is
+    # the per-channel decay of the delta rule, `gate` the SiLU output
+    # gate. See wisp/runtime/kda_layer.py for the recurrence itself.
+    #
+    # WARNING — these tensor names are NOT verified against released
+    # weights. The technical report describes the mechanism, not the
+    # checkpoint layout, and no K3 checkpoint has been converted with
+    # this code yet. `kda_tensor_aliases` therefore accepts several
+    # plausible spellings, and `wisp convert` reports exactly which ones
+    # it matched so a mismatch is loud rather than silent.
+    kda_projection_names = ("q_proj", "k_proj", "v_proj", "o_proj",
+                            "beta", "gate")
+
+    kda_tensor_aliases = {
+        "beta": ("beta", "beta_proj", "b_proj", "k_b", "decay_proj"),
+        "gate": ("gate", "gate_proj", "g_proj", "wq_b", "output_gate"),
+        "q_proj": ("q_proj", "wq", "wq_a", "q_a_proj"),
+        "k_proj": ("k_proj", "wk"),
+        "v_proj": ("v_proj", "wv"),
+        "o_proj": ("o_proj", "wo", "out_proj"),
+    }
+
+    def canonical_dense_name(self, hf_name: str) -> str | None:
+        """
+        Map a K3 checkpoint tensor onto WISP's canonical dense layout.
+
+        KDA projections are DENSE weights — resident per layer, like any
+        attention matrix — so they ride in dense/model_dense.safetensors
+        beside everything else rather than in a parallel directory. That
+        keeps one loader, one file, one format.
+        """
+        import re as _re
+        m = _re.match(
+            r"model\.layers\.(\d+)\.(?:attention|self_attn)\.(.+?)"
+            r"(?:\.weight)?$", hf_name)
+        if m:
+            layer, leaf = int(m.group(1)), m.group(2)
+            if self.is_kda_layer(layer):
+                for canonical, aliases in self.kda_tensor_aliases.items():
+                    if leaf in aliases:
+                        return f"layers.{layer}.kda.{canonical}"
+        return super().canonical_dense_name(hf_name)
+
+    def manifest_extras(self) -> dict:
+        """Recorded in manifest.json so the engine knows, per layer,
+        which attention path to take without re-deriving the pattern."""
+        return {
+            "kda": {
+                "enabled": True,
+                "pattern": "3x KDA + 1x GatedMLA, final layer always MLA",
+                "num_kda_layers": self.num_kda_layers,
+                "num_mla_layers": self.num_mla_layers,
+                "kda_layer_indices": [i for i in range(self.num_layers)
+                                      if self.is_kda_layer(i)],
+                "projections": list(self.kda_projection_names),
+                "router_latent_dim": self.router_latent_dim,
+                "tensor_names_verified": False,
+            }
+        }
+
     def get_drafter_config(self) -> dict:
         # Kimi K2 as same-family drafter via the dense drafter path
         # (same fallback machinery as the DeepSeek distill drafters).

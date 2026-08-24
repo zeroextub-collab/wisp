@@ -151,7 +151,33 @@ __global__ void kda_prefill_kernel(
 /* ---------------------------------------------------------------------
  * Launchers (C linkage — called from the engine and the bindings)
  * ------------------------------------------------------------------- */
+__global__ void f32_to_f16_kernel(const float* __restrict__ src,
+                                  __half* __restrict__ dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __float2half(src[i]);
+}
+
+__global__ void f16_to_f32_kernel(const __half* __restrict__ src,
+                                  float* __restrict__ dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __half2float(src[i]);
+}
+
 extern "C" {
+
+void wisp_gpu_f16_to_f32(const wisp_half* src, float* dst, int n,
+                         cudaStream_t s) {
+    if (n <= 0) return;
+    f16_to_f32_kernel<<<(n + 255) / 256, 256, 0, s>>>(
+        (const __half*)src, dst, n);
+}
+
+void wisp_gpu_f32_to_f16(const float* src, wisp_half* dst, int n,
+                         cudaStream_t s) {
+    if (n <= 0) return;
+    f32_to_f16_kernel<<<(n + 255) / 256, 256, 0, s>>>(
+        src, (__half*)dst, n);
+}
 
 size_t wisp_kda_state_bytes(int batch_size, int num_heads,
                             int d_k, int d_v, int num_kda_layers) {

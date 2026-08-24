@@ -26,8 +26,11 @@ def test_info_by_model_name_kimi_k3(runner):
     assert "1,488" in result.output            # lookups/token = 16 x 93
     assert "56x expert-level" in result.output  # 896 / 16
     assert "KDA" in result.output and "GatedMLA" in result.output
-    # ...but the missing kernel must still be stated plainly
-    assert "no KDA kernel yet" in result.output
+    # The kernel exists now; what must still be stated plainly is that
+    # the tensor NAMES are unverified, since a silent mismatch means
+    # wrong output rather than a crash.
+    assert "KDA kernel implemented" in result.output
+    assert "unverified" in result.output
 
 
 def test_info_by_model_name_glm(runner):
@@ -52,11 +55,17 @@ def test_doctor_runs(runner):
     assert "Model storage:" in result.output
 
 
-def test_convert_kimi_k3_blocked_until_july_27(runner, tmp_path):
+def test_convert_kimi_k3_no_longer_date_blocked(runner, tmp_path):
+    """The July-27 guard is gone: K3 weights and the technical report are
+    both public. Conversion now fails only for ordinary reasons (no
+    weights on disk / no network), never because of a calendar check."""
     result = runner.invoke(
         main, ["convert", "--model", "kimi-k3", "--output", str(tmp_path)])
-    assert result.exit_code != 0
-    assert "July 27" in result.output
+    assert "July 27" not in result.output
+    assert "unlocks" not in result.output
+    # The unverified-tensor-name warning must still be shown, because
+    # getting that wrong silently produces wrong output.
+    assert "KDA projection names" in result.output
 
 
 def test_run_requires_existing_model_dir(runner):

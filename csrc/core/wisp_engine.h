@@ -310,6 +310,16 @@ typedef struct {
     wisp_half* o_proj;
     int is_dense_mlp;         /* early layers with no routed experts        */
     int shared_inter;         /* rows of shared_gate (per-layer actual)     */
+
+    /* Hybrid attention (Kimi K3): 69 of 93 layers are KDA linear
+     * attention, the rest Gated MLA. is_kda_layer is set only when the
+     * manifest says so AND every KDA projection actually loaded — a
+     * partially-mapped checkpoint falls back to the standard path
+     * rather than reading NULL weights. */
+    int is_kda_layer;
+    int kda_slot;             /* index into the engine's KDA state pool    */
+    wisp_half* kda_beta;      /* per-channel decay projection              */
+    wisp_half* kda_gate;      /* SiLU output gate projection               */
 } WispLayerWeights;
 
 /* KV cache. Layout per layer: K [max_seq, kv_heads, k_dim] fp16 and
@@ -364,6 +374,20 @@ typedef struct WispEngine {
 
     /* per-layer expert shape metadata (parsed once) */
     WispExpertMeta* expert_meta;   /* [num_layers]                          */
+
+    /* KDA recurrent state: [num_kda_layers][batch][heads][d_k][d_v] fp32.
+     * Constant in sequence length — that is the whole point of linear
+     * attention — so this is allocated once and reset per conversation. */
+    float* kda_state;
+    int    kda_layer_count;
+    int    kda_d_k;
+    int    kda_d_v;
+    wisp_half* kda_q16;            /* fp16 staging for the kernel           */
+    wisp_half* kda_k16;
+    wisp_half* kda_v16;
+    wisp_half* kda_beta16;
+    wisp_half* kda_gate16;
+    wisp_half* kda_out16;
 
     /* Scratch-ring expert serving. Measured on the first real Mixtral
      * runs (2026-07-19): force-promoting every RAM hit into a VRAM tier
@@ -609,6 +633,12 @@ cudaError_t wisp_kda_decode_step(float* state,
                                  const wisp_half* gate, wisp_half* output,
                                  int batch_size, int num_heads,
                                  int d_k, int d_v, cudaStream_t stream);
+/* fp32 -> fp16 staging for the KDA kernel (engine activations are fp32,
+ * the recurrence kernel reads fp16). */
+void wisp_gpu_f32_to_f16(const float* src, wisp_half* dst, int n,
+                         cudaStream_t s);
+void wisp_gpu_f16_to_f32(const wisp_half* src, float* dst, int n,
+                         cudaStream_t s);
 cudaError_t wisp_kda_prefill(float* state_out, const float* state_in,
                              const wisp_half* q, const wisp_half* k,
                              const wisp_half* v, const wisp_half* beta,
