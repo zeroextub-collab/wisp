@@ -14,7 +14,7 @@ def runner():
 def test_version(runner):
     result = runner.invoke(main, ["--version"])
     assert result.exit_code == 0
-    assert "1.0.0" in result.output
+    assert "2.0.0" in result.output
 
 
 def test_info_by_model_name_kimi_k3(runner):
@@ -107,7 +107,7 @@ def test_mixtral_wisp_info(runner):
 
 def test_package_metadata_exports():
     import wisp
-    assert wisp.__version__ == "1.0.0"
+    assert wisp.__version__ == "2.0.0"
     assert wisp.__author__ == "Saksham (Zero_planck)"
 
 

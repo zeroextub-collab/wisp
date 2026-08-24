@@ -318,11 +318,49 @@ def test_qwen3_moe_respects_dense_layer_interleave(tmp_path):
     assert a.total_expert_lookups_per_token == 8 * 2
 
 
+def test_glm53_inherits_glm52():
+    from wisp.models.glm52 import GLM52Adapter
+    from wisp.models.glm53 import GLM53Adapter
+    a = get_adapter("glm-5.3")
+    assert isinstance(a, GLM53Adapter)
+    assert isinstance(a, GLM52Adapter)
+    assert a.family == "glm53"
+    assert "pre-release" in a.name
+    assert a.architecture_published is False
+
+
+def test_glm53_info_works():
+    """Planning against a GLM-5.2-shaped baseline is useful, so info must
+    not crash even though the real architecture is unpublished."""
+    from click.testing import CliRunner
+    from wisp.cli import main
+    result = CliRunner().invoke(main, ["info", "--model", "glm-5.3"])
+    assert result.exit_code == 0, result.output
+    assert "GLM-5.3" in result.output
+
+
+def test_glm53_convert_raises_not_implemented():
+    """Converting against guessed architecture would yield a model that
+    verifies clean and generates garbage — refuse instead."""
+    a = get_adapter("glm-5.3")
+    with pytest.raises(NotImplementedError) as exc:
+        a.convert()
+    assert "not yet released" in str(exc.value)
+
+
+def test_glm53_manifest_flags_placeholder():
+    a = get_adapter("glm-5.3")
+    extras = a.manifest_extras()
+    assert extras["architecture_published"] is False
+    assert extras["baseline"] == "glm52"
+
+
 def test_registry_resolution_and_errors():
     assert set(supported_models()) == {"glm-5.2", "deepseek-v3",
                                        "deepseek-r1", "kimi-k3",
                                        "mixtral-8x7b", "mixtral-8x22b",
-                                       "qwen3-235b", "qwen3-2.4t"}
+                                       "qwen3-235b", "qwen3-2.4t",
+                                       "glm-5.3"}
     assert get_adapter("GLM-5.2").family == "glm52"
     assert get_adapter("zai-org/GLM-5.2").family == "glm52"
     assert get_adapter("kimi_k3").family == "kimi_k3"

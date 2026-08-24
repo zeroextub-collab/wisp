@@ -2,10 +2,12 @@
 
 > Stream what shouldn't run.
 
-[![Tests](https://img.shields.io/badge/tests-173%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-177%20passing-brightgreen)]()
 [![CUDA](https://img.shields.io/badge/CUDA-12.0%2B%20%7C%2013.x-76b900)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
+[![Version](https://img.shields.io/badge/version-2.0.0-informational)]()
+[![Stars](https://img.shields.io/github/stars/zeroextub-collab/wisp?style=social)](https://github.com/zeroextub-collab/wisp)
 [![Models](https://img.shields.io/badge/models-GLM--5.2%20%7C%20DeepSeek%20%7C%20Mixtral%20%7C%20Kimi%20K3%20%7C%20Qwen3-orange)]()
 [![DGX Spark](https://img.shields.io/badge/DGX_Spark-Unified_Memory-purple)]()
 [![ROCm](https://img.shields.io/badge/ROCm-7.0%2B_detection-red)]()
@@ -35,10 +37,33 @@ and your NVMe SSD in real time.
 | Kimi K3 | 2.8T | 104B | 1,488 | ~1.4 TB | ⚠️ KDA wired, names unverified |
 | Qwen3-235B-A22B | 235B | 22B | 752 | ~130 GB | ✅ Ready |
 | Qwen3-2.4T | 2.4T | ~22B est. | config-driven | ~1.2 TB est. | ✅ Adapter ready — weights pending |
+| GLM-5.3 | TBD | TBD | TBD | TBD | 🔜 Day-0 stub |
 
 *Measured from a real conversion — every expert file verified.
 "Verified end-to-end" means: downloaded, converted, and generated
 real tokens through the full C + CUDA engine on consumer hardware.
+
+---
+
+## Desktop GUI
+
+WISP ships with a native desktop GUI.
+
+```bash
+pip install 'wisp-engine[gui,server]'
+wisp-gui                      # or: wisp-gui ./models/mixtral-8x7b
+```
+
+- Real-time token streaming
+- Live tier monitor (VRAM / RAM / NVMe)
+- Live stats (tok/s, cache hit rate, expert lookups, learning cache)
+- An OpenAI API client that starts `wisp serve` internally
+
+It is not a wrapper around the CLI: it hosts the same `WispServer` in a
+background thread on a private loopback port and talks HTTP to it, so
+the path it exercises is the one Cursor and Open WebUI use.
+
+*Screenshot: coming soon — submit yours via GitHub Issues.*
 
 ---
 
@@ -237,6 +262,42 @@ what lets the learning cache persist.
 
 ---
 
+## Hardware Platforms
+
+### NVIDIA CUDA — all consumer GPUs
+The standard three-tier mode: VRAM → RAM → NVMe. RTX 3080 or better
+recommended; CUDA 12.0+ (12.8+ for RTX 50-series). This is the only
+path that has been run end-to-end on real weights.
+
+### NVIDIA DGX Spark — unified memory mode
+128GB of coherent LPDDR5x at 273 GB/s: the CPU and GPU address the same
+physical memory, so WISP's VRAM and RAM tiers *are* the same pool. The
+hierarchy collapses to two tiers — unified pool → NVMe SSD — and the
+RAM→VRAM copy that the double buffer exists to hide simply does not
+happen. Prefetch from NVMe still matters.
+
+`wisp doctor` detects a Spark (aarch64 + a GB10-class device + a ~128GB
+pool, all three required) and the tier planner switches to unified mode
+automatically. Two NVLinked Sparks are detected as a 256GB pool, which
+is what puts most of a 2.8T model's experts in silicon at all.
+
+GLM-5.2 (744B) fits most of its experts in a single 128GB pool.
+Kimi K3 (2.8T) is the two-Spark case.
+
+**Detection and planning are implemented; no Spark has been benchmarked.**
+
+### AMD Radeon AI PRO R9700 — ROCm detection
+32GB GDDR6, 640 GB/s, gfx1201, dual-slot blower for stacking. WISP v2.0
+*detects* the card through ROCm — `wisp doctor` reports it, its VRAM and
+its target, and multiple cards pool in the plan. Setup:
+`scripts/install_rocm.sh` (Ubuntu) or `install_rocm.ps1` (Windows).
+
+**Detection only.** WISP's compute kernels are CUDA; inference does not
+run on an R9700 yet. The HIP port is v2.1. Every number in the table
+below is a projection from the tier math, not a measurement.
+
+---
+
 ## Performance
 
 *First verified on: R7 9800X3D | RTX 5070 12GB |
@@ -354,6 +415,15 @@ wisp verify --model ./models/glm-5.2/
 wisp upload --model ./models/glm-5.2/ --repo you/glm-5.2-wisp
 ```
 
+### GUI
+
+```bash
+pip install 'wisp-engine[gui]'
+wisp-gui
+```
+
+Opens the desktop app; point it at a converted model directory.
+
 ### Python API
 
 ```python
@@ -395,7 +465,7 @@ Zero manual configuration needed.
 | 4× RTX 4090 | 96GB | Near full cache | Good |
 | 4× RTX 6000 Ada | 192GB | Full expert cache | Strong |
 
-### AMD Radeon AI PRO R9700 (projected — ROCm lands v1.1)
+### AMD Radeon AI PRO R9700 (projected — ROCm compute lands v2.1)
 
 The R9700 is purpose-built for exactly what WISP does:
 32GB GDDR6 per card, dual-slot blower for dense stacking,
@@ -448,20 +518,27 @@ WISP just delivers them as fast as possible.
 Three layers, one job each: **Python** orchestrates (download,
 convert, configure — things that run once), **C** owns the hot
 path (64-1,488 expert fetches per token, cache coordination,
-prefetch threads), **CUDA** owns the math (absorbed MLA / GQA
-attention, int4 dequant, fused SwiGLU FFN, router top-K).
+prefetch threads), **CUDA** owns the math (absorbed MLA / GQA /
+KDA attention, int4 dequant, fused SwiGLU FFN, router top-K).
 The engine is model-agnostic: adapters map every family onto
-one canonical weight layout at conversion time.
+one canonical weight layout at conversion time, so adding a model
+is one adapter file — not a new engine.
+
+On a coherent-memory machine the tier planner emits a two-tier
+plan instead (unified pool → NVMe); nothing else in the stack
+changes.
 
 ---
 
 ## Roadmap
 
-### v1.0.1 — This Week
+### Still unmeasured — help wanted
 - Real GLM-5.2 benchmark numbers
 - Real DeepSeek-V3 benchmark numbers
 - Warm/hot steady-state Mixtral numbers (long runs)
-- Any community-reported bugs
+- A Kimi K3 conversion against real weights, to confirm the KDA
+  tensor names WISP currently infers
+- A DGX Spark run, to replace the unified-mode projections
 
 ### Shipped since v1.0
 - [x] KDA linear-attention kernel (CUDA + PyTorch fallback)
@@ -469,22 +546,35 @@ one canonical weight layout at conversion time.
 - [x] OpenAI-compatible API server (`wisp serve`)
 - [x] Desktop GUI (`wisp-gui`) — chat + live tier/stat monitors
 
-### v1.1 — Kimi K3
+### v2.0 — current release
+- [x] Kimi K3 KDA wired end to end (converter mapping + C forward-pass
+      branch; tensor names still unverified — see the table note)
+- [x] Qwen3-235B-A22B and Qwen3-2.4T adapters, config-driven
+- [x] Desktop GUI (`wisp-gui`)
+- [x] DGX Spark unified-memory detection and tier mode
+- [x] AMD R9700 ROCm detection
+
+### v2.1 — next
+- GLM-5.3 day-0 support (adapter stubbed, ready to activate)
+- Full ROCm compute kernels (HIP port of the CUDA kernels)
+- macOS / Metal backend
+- Terminal UI dashboard
+
+### Kimi K3 — where it stands
 Architecture is confirmed (technical report arXiv:2607.24653):
 93 layers = 69 KDA + 24 Gated MLA in a 3:1 interleave, 896 experts
 per layer, top-16, 104B active. The 24 Gated MLA layers map onto
-WISP's existing absorbed-MLA path; the 69 KDA layers need a new
-linear-attention kernel.
-- Kimi K3 (2.8T) full support:
-  KDA linear attention + Stable LatentMoE routing
-- Qwen3-235B adapter
-- Qwen3.8 adapter (open weights expected soon,
-  architecture TBD — ready to implement the day
-  Alibaba publishes specs)
-- ROCm support (AMD R9700 + RX 7900 XTX)
-- Terminal UI dashboard
+WISP's existing absorbed-MLA path; the 69 KDA layers run through the
+CUDA linear-attention kernel shipped in v2.0.
 
-### v2.0 — Community Driven
+What is **not** confirmed: the checkpoint's tensor names for the six
+KDA projections. WISP matches a list of plausible spellings and the
+converter prints how many it matched — if that count is 0, it says so
+loudly, because the run would otherwise produce a model that loads
+and generates nonsense. This resolves the first time anyone converts
+real K3 weights.
+
+### v3.0 — Community Driven
 - Generic MoE adapter (any HuggingFace MoE model)
 - GPUDirect Storage (Linux, datacenter GPUs)
 - Web UI (`wisp serve`)

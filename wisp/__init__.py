@@ -12,7 +12,7 @@ Universal MoE inference engine: GPU VRAM -> System RAM -> NVMe SSD.
         print(token, end="", flush=True)
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "Saksham (Zero_planck)"
 
 

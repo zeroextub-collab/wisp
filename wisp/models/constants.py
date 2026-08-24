@@ -43,6 +43,7 @@ EXPERT_SIZE_INT4: dict[str, int] = {
     "mixtral_8x7b":  99_090_552,   # MEASURED from real conversion 2026-07-19
                                    # (176.2M params x 0.5625 B/param + header)
     "mixtral_8x22b": 169_869_552,  # computed: 302.0M params x 0.5625 + header
+    "glm53":       18_350_080,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,7 @@ DENSE_SIZE: dict[str, int] = {
     "mixtral_8x22b": 10_700_000_000,   # computed from architecture (~10.7 GB)
     "qwen3_235b":   6_000_000_000,   # estimated (4096 hidden, 94 layers)
     "qwen3_2_4t":  20_000_000_000,   # estimated
+    "glm53":       9_900_000_000,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 NUM_LAYERS: dict[str, int] = {
@@ -72,6 +74,7 @@ NUM_LAYERS: dict[str, int] = {
     "mixtral_8x22b": 56,
     "qwen3_235b":  94,   # CONFIRMED — config.json
     "qwen3_2_4t":  160,  # ESTIMATED — config not public; read at convert time
+    "glm53":       61,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 TOP_K_ROUTING: dict[str, int] = {
@@ -83,6 +86,7 @@ TOP_K_ROUTING: dict[str, int] = {
     "mixtral_8x22b": 2,
     "qwen3_235b":  8,    # CONFIRMED — num_experts_per_tok
     "qwen3_2_4t":  8,    # estimated (same family)
+    "glm53":       8,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 NUM_EXPERTS_PER_LAYER: dict[str, int] = {
@@ -94,6 +98,7 @@ NUM_EXPERTS_PER_LAYER: dict[str, int] = {
     "mixtral_8x22b": 8,
     "qwen3_235b":  128,  # CONFIRMED — num_experts
     "qwen3_2_4t":  128,  # estimated
+    "glm53":       256,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 NUM_SHARED_EXPERTS: dict[str, int] = {
@@ -107,6 +112,7 @@ NUM_SHARED_EXPERTS: dict[str, int] = {
     # shared_expert_intermediate_size is absent from the config.
     "qwen3_235b":  0,
     "qwen3_2_4t":  0,
+    "glm53":       2,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 TOTAL_PARAMETERS: dict[str, int] = {
@@ -118,6 +124,7 @@ TOTAL_PARAMETERS: dict[str, int] = {
     "mixtral_8x22b": 141_000_000_000,
     "qwen3_235b":   235_000_000_000,
     "qwen3_2_4t": 2_400_000_000_000,
+    "glm53":       744_000_000_000,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 HIDDEN_SIZE: dict[str, int] = {
@@ -129,6 +136,7 @@ HIDDEN_SIZE: dict[str, int] = {
     "mixtral_8x22b": 6144,
     "qwen3_235b":  4096,  # CONFIRMED — NOT 7168 (that is GLM/K3)
     "qwen3_2_4t":  8192,  # estimated
+    "glm53":       7168,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 VOCAB_SIZE: dict[str, int] = {
@@ -140,6 +148,7 @@ VOCAB_SIZE: dict[str, int] = {
     "mixtral_8x22b": 32_000,
     "qwen3_235b":  151_936,  # CONFIRMED
     "qwen3_2_4t":  151_936,  # estimated
+    "glm53":       151_552,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 ATTENTION_TYPE: dict[str, str] = {
@@ -155,6 +164,7 @@ ATTENTION_TYPE: dict[str, str] = {
     "mixtral_8x22b": "GQA",   # 48 query heads / 8 KV heads
     "qwen3_235b":  "GQA",   # 64 query / 4 KV heads — NOT MLA
     "qwen3_2_4t":  "GQA",
+    "glm53":       "MLA",  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 # Parameters actually activated per token (dense path + routed experts).
@@ -169,6 +179,7 @@ ACTIVE_PARAMETERS: dict[str, int] = {
     "mixtral_8x22b": 39_000_000_000,
     "qwen3_235b":  22_000_000_000,   # A22B
     "qwen3_2_4t":  22_000_000_000,   # estimated
+    "glm53":       40_000_000_000,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 # Layer-level attention layout. Uniform families just repeat one kind of
@@ -185,6 +196,7 @@ ATTENTION_PATTERN: dict[str, str] = {
     "mixtral_8x22b": "uniform GQA",
     "qwen3_235b":  "uniform GQA",
     "qwen3_2_4t":  "uniform GQA",
+    "glm53":       "uniform MLA (placeholder)",
 }
 
 # Expert-level sparsity = experts_per_layer / top_k. NOTE this is a
@@ -205,6 +217,7 @@ MAX_POSITION_EMBEDDINGS: dict[str, int] = {
     "mixtral_8x22b":    65_536,
     "qwen3_235b":  32_768,
     "qwen3_2_4t":  32_768,
+    "glm53":       1_048_576,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 # ---------------------------------------------------------------------------
@@ -219,6 +232,7 @@ HF_MODEL_ID: dict[str, str] = {
     "mixtral_8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
     "qwen3_235b":  "Qwen/Qwen3-235B-A22B",
     "qwen3_2_4t":  "Qwen/Qwen3-2.4T",   # anticipated repo
+    "glm53":       "zai-org/GLM-5.3",   # anticipated repo
 }
 
 # ---------------------------------------------------------------------------
@@ -238,6 +252,7 @@ DRAFTER_HF_ID: dict[str, str] = {
     "mixtral_8x22b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "qwen3_235b":  "Qwen/Qwen3-1.7B",
     "qwen3_2_4t":  "Qwen/Qwen3-1.7B",
+    "glm53":       "matey-0/GLM-5.2-mtp-int8",  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 DEFAULT_ACCEPTANCE_RATE: dict[str, float] = {
@@ -249,6 +264,7 @@ DEFAULT_ACCEPTANCE_RATE: dict[str, float] = {
     "mixtral_8x22b": 0.38,
     "qwen3_235b":  0.48,
     "qwen3_2_4t":  0.46,
+    "glm53":       0.49,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 # Approximate drafter footprints for the VRAM fit logic (bytes).
@@ -284,6 +300,7 @@ DISK_SIZE_INT4: dict[str, int] = {
     "mixtral_8x22b":  90 * GB,   # computed: 76 GB experts + 10.7 GB dense
     "qwen3_235b":  130 * GB,   # 12,032 experts x ~10.6MB + dense
     "qwen3_2_4t": 1200 * GB,   # estimated
+    "glm53":       370 * GB,  # PLACEHOLDER — GLM-5.2 baseline
 }
 
 # ---------------------------------------------------------------------------

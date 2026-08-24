@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .base_adapter import ModelAdapter
 from .glm52 import GLM52Adapter
+from .glm53 import GLM53Adapter
 from .deepseek_v3 import DeepSeekV3Adapter
 from .deepseek_r1 import DeepSeekR1Adapter
 from .kimi_k3 import KimiK3Adapter
@@ -21,6 +22,7 @@ from .qwen3_moe import Qwen3MoEAdapter, Qwen3_2_4T_Adapter
 _ADAPTERS: dict[str, type[ModelAdapter]] = {
     # family keys
     "glm52":         GLM52Adapter,
+    "glm53":         GLM53Adapter,
     "deepseek_v3":   DeepSeekV3Adapter,
     "deepseek_r1":   DeepSeekR1Adapter,
     "kimi_k3":       KimiK3Adapter,
@@ -31,6 +33,8 @@ _ADAPTERS: dict[str, type[ModelAdapter]] = {
     # CLI spellings
     "glm-5.2":       GLM52Adapter,
     "glm5.2":        GLM52Adapter,
+    "glm-5.3":       GLM53Adapter,
+    "glm-5.3-moe":   GLM53Adapter,
     "deepseek-v3":   DeepSeekV3Adapter,
     "deepseek-r1":   DeepSeekR1Adapter,
     "kimi-k3":       KimiK3Adapter,
@@ -43,6 +47,7 @@ _ADAPTERS: dict[str, type[ModelAdapter]] = {
     "qwen3.8":          Qwen3_2_4T_Adapter,
     # HF ids
     "zai-org/glm-5.2":          GLM52Adapter,
+    "zai-org/glm-5.3":          GLM53Adapter,
     "deepseek-ai/deepseek-v3":  DeepSeekV3Adapter,
     "deepseek-ai/deepseek-r1":  DeepSeekR1Adapter,
     "moonshotai/kimi-k3":       KimiK3Adapter,
@@ -55,7 +60,8 @@ _ADAPTERS: dict[str, type[ModelAdapter]] = {
 
 def supported_models() -> list[str]:
     return ["glm-5.2", "deepseek-v3", "deepseek-r1", "kimi-k3",
-            "mixtral-8x7b", "mixtral-8x22b", "qwen3-235b", "qwen3-2.4t"]
+            "mixtral-8x7b", "mixtral-8x22b", "qwen3-235b", "qwen3-2.4t",
+            "glm-5.3"]
 
 
 def get_adapter(name: str) -> ModelAdapter:

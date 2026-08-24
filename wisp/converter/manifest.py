@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..models.base_adapter import ModelAdapter
 
-WISP_VERSION = "1.0.0"
+WISP_VERSION = "2.0.0"
 MANIFEST_FILENAME = "manifest.json"
 EXPERT_NAMING = "L{layer:03d}_E{expert:05d}.bin"
 

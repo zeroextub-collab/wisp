@@ -111,7 +111,7 @@ with open(ROOT / "requirements.txt", encoding="utf-8") as f:
 
 setup(
     name="wisp-engine",
-    version="1.0.0",
+    version="2.0.0",
     description="Stream what shouldn't run. Universal MoE inference engine.",
     long_description=long_description,
     long_description_content_type="text/markdown",
