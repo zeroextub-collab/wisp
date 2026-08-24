@@ -281,6 +281,12 @@ typedef struct {
     float rope_theta;
     float rms_eps;
     int group_size;          /* int4 quant group size                       */
+    /* Coherent-memory platforms (NVIDIA DGX Spark GB10): the CPU and GPU
+     * address the same physical memory, so the VRAM/RAM tier boundary is
+     * fictional there. In unified mode the engine keeps ONE flat expert
+     * pool instead of two, and no PCIe copy happens between them. */
+    int unified_memory_mode; /* 0 = normal 3-tier, 1 = unified 2-tier       */
+    float unified_pool_gb;
     size_t expert_size_bytes;
     int64_t max_pos;
 } WispModelConfig;

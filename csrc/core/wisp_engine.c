@@ -1623,6 +1623,8 @@ static WispError load_manifest(WispEngine* eng, WispErrCtx* err) {
     c->rope_theta   = (float)json_double(json, "rope_theta", 10000.0);
     c->rms_eps      = (float)json_double(json, "rms_norm_eps", 1e-6);
     c->group_size   = (int)json_int(json, "group_size", 64);
+    c->unified_memory_mode = (int)json_int(json, "unified_memory_mode", 0);
+    c->unified_pool_gb = (float)json_double(json, "unified_pool_gb", 0.0);
     c->expert_size_bytes =
         (size_t)json_int(json, "expert_size_bytes", 18350080);
     c->max_pos      = json_int(json, "max_position_embeddings", 131072);
@@ -1946,6 +1948,22 @@ WispEngine* wisp_engine_create(const char* model_path,
 
     eng->experts_on_gpu =
         eng->use_gpu && vram_expert_budget_bytes >= eng->max_expert_bytes;
+
+    /* DGX Spark: CPU and GPU share the same physical memory. No PCIe
+     * copy is needed between the "VRAM" and "RAM" tiers because they are
+     * the same pool, so the expert cache is one contiguous allocation
+     * and the RAM tier is left empty rather than mirroring it. */
+    if (eng->cfg.unified_memory_mode) {
+        if (eng->cfg.unified_pool_gb > 0.0f) {
+            size_t pool = (size_t)(eng->cfg.unified_pool_gb * 1e9);
+            if (pool > vram_expert_budget_bytes)
+                vram_expert_budget_bytes = pool;
+        }
+        ram_expert_budget_bytes = 0;
+        fprintf(stderr, "  [WISP] Unified memory mode: one %.0f GB expert "
+                        "pool, no RAM tier, no PCIe copies\n",
+                (double)vram_expert_budget_bytes / 1e9);
+    }
 
     /* Tier caches */
     eng->vram_cache = (LRUCache*)calloc(1, sizeof(LRUCache));

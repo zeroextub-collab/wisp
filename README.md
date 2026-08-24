@@ -2,11 +2,13 @@
 
 > Stream what shouldn't run.
 
-[![Tests](https://img.shields.io/badge/tests-162%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-173%20passing-brightgreen)]()
 [![CUDA](https://img.shields.io/badge/CUDA-12.0%2B%20%7C%2013.x-76b900)]()
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![License](https://img.shields.io/badge/license-MIT-green)]()
-[![Models](https://img.shields.io/badge/models-GLM--5.2%20%7C%20DeepSeek%20%7C%20Mixtral%20%7C%20Kimi%20K3-orange)]()
+[![Models](https://img.shields.io/badge/models-GLM--5.2%20%7C%20DeepSeek%20%7C%20Mixtral%20%7C%20Kimi%20K3%20%7C%20Qwen3-orange)]()
+[![DGX Spark](https://img.shields.io/badge/DGX_Spark-Unified_Memory-purple)]()
+[![ROCm](https://img.shields.io/badge/ROCm-7.0%2B_detection-red)]()
 
 WISP runs the largest open-source AI models ever built
 on the hardware sitting on your desk.
@@ -405,10 +407,12 @@ PCIe 5.0, 1531 TOPS INT4.
 | 2× R9700 | 64GB | Dense + 3,085 experts | 18-25 |
 | 4× R9700 | 128GB | Dense + 6,741 experts | 38-52 |
 
-> **Note:** R9700 uses ROCm (not CUDA). WISP v1.0 is CUDA
-> only; ROCm support is planned for v1.1. All R9700 numbers
-> are projections from the tier math, not measurements.
-> ROCm contributions welcome.
+> **Note:** WISP now *detects* the R9700 through ROCm — `wisp doctor`
+> reports the card, its VRAM, and the gfx1201 target, and the tier
+> planner sizes for it. It does **not** run on it: the compute kernels
+> are CUDA and the HIP port is separate work. All R9700 throughput
+> figures below remain projections from the tier math, not measurements.
+> `scripts/install_rocm.sh` sets up detection. Contributions welcome.
 
 ---
 

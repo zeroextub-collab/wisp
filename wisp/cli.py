@@ -808,6 +808,37 @@ def doctor(models_dir: str):
         click.echo(f"    GPU:      {g.name} "
                    f"{_gb(g.vram_total_bytes)} {OK}")
 
+    # --- Alternative platforms -------------------------------------------
+    if getattr(p, "accelerator", "cuda") == "unified":
+        pool = p.unified_memory_gb
+        click.echo("")
+        click.echo(f"  DGX Spark detected — unified memory mode {OK}")
+        click.echo(f"    {pool:.0f}GB coherent pool available for expert "
+                   f"cache")
+        click.echo(f"    Memory bandwidth: {p.unified_bandwidth_gb_s:.0f} "
+                   f"GB/s")
+        click.echo("    Tier hierarchy: unified pool → NVMe SSD "
+                   "(2 tiers, not 3)")
+        click.echo("    CPU and GPU share the same memory, so there is no "
+                   "PCIe copy")
+        click.echo("    between tiers and no display reserve to subtract.")
+    elif getattr(p, "amd_gpu", None):
+        amd = p.amd_gpu
+        click.echo("")
+        click.echo(f"  AMD GPU detected {WARN}")
+        click.echo(f"    {amd['count']}x Radeon AI PRO R9700 — "
+                   f"{amd['vram_gb']}GB each "
+                   f"({amd['vram_gb'] * amd['count']}GB total), "
+                   f"{amd['gfx_target']}")
+        if amd.get("rocm_version"):
+            click.echo(f"    ROCm: {amd['rocm_version']}")
+        click.echo("    DETECTION ONLY: WISP's compute kernels are CUDA. "
+                   "Your card is")
+        click.echo("    recognised and sized correctly, but inference "
+                   "will not run on it")
+        click.echo("    until the HIP port lands. CPU-only mode works "
+                   "today.")
+
     # --- Display routing -------------------------------------------------
     if p.gpus:
         g0 = p.gpus[0]

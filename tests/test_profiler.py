@@ -186,6 +186,173 @@ def test_auto_buffer_calculation():
             assert igpu_cfg.vram_expert_count > auto_cfg.vram_expert_count
 
 
+# --------------------------------------------------------------------------
+# Alternative platforms: DGX Spark (unified memory) and AMD ROCm
+# --------------------------------------------------------------------------
+
+def test_detect_dgx_spark_returns_none_on_x86(monkeypatch):
+    """The arch check short-circuits before any subprocess runs."""
+    import platform as _platform
+    from wisp.system import profiler as prof
+    monkeypatch.setattr(_platform, "machine", lambda: "x86_64")
+    called = []
+    monkeypatch.setattr(prof, "_run",
+                        lambda *a, **k: called.append(a) or "")
+    assert prof.detect_dgx_spark() is None
+    assert called == [], "must not shell out on a non-ARM machine"
+
+
+def test_detect_dgx_spark_structure(monkeypatch):
+    import platform as _platform
+    from wisp.system import profiler as prof
+    monkeypatch.setattr(_platform, "machine", lambda: "aarch64")
+
+    def fake_run(cmd, timeout=5.0):
+        joined = " ".join(cmd)
+        if "--query-gpu=name" in joined:
+            return "NVIDIA GB10 Grace Blackwell Superchip"
+        if "memory.total" in joined:
+            return "131072"
+        return ""
+    monkeypatch.setattr(prof, "_run", fake_run)
+
+    spark = prof.detect_dgx_spark()
+    assert spark is not None
+    assert spark["type"] == "dgx_spark"
+    assert spark["unified_memory_gb"] == 128
+    assert spark["bandwidth_gb_s"] == 273
+    assert spark["two_node"] is False
+
+
+def test_detect_dgx_spark_rejects_ordinary_arm_gpu(monkeypatch):
+    """ARM alone is not a Spark — a Jetson must not be mistaken for one."""
+    import platform as _platform
+    from wisp.system import profiler as prof
+    monkeypatch.setattr(_platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(prof, "_run",
+                        lambda cmd, timeout=5.0:
+                        "NVIDIA Jetson AGX Orin"
+                        if "name" in " ".join(cmd) else "32768")
+    assert prof.detect_dgx_spark() is None
+
+
+def test_detect_dgx_spark_dual_detects_nvlink(monkeypatch):
+    import platform as _platform
+    from wisp.system import profiler as prof
+    monkeypatch.setattr(_platform, "machine", lambda: "aarch64")
+
+    def fake_run(cmd, timeout=5.0):
+        joined = " ".join(cmd)
+        if "topo" in joined:
+            return "GPU0 GPU1 | GPU0 X NV1 | GPU1 NV1 X"
+        if "--query-gpu=name" in joined:
+            return "NVIDIA GB10" + chr(10) + "NVIDIA GB10"
+        if "memory.total" in joined:
+            return "131072"
+        return ""
+    monkeypatch.setattr(prof, "_run", fake_run)
+
+    spark = prof.detect_dgx_spark_dual()
+    assert spark["two_node"] is True
+    assert spark["nodes"] == 2
+    assert spark["unified_memory_gb"] == 256
+
+
+def test_dgx_spark_auto_config_uses_unified_mode():
+    """Unified mode collapses the tiers: one pool, no RAM tier."""
+    profile = _fake_profile([_gpu(vram_gb=128)])
+    profile.accelerator = "unified"
+    profile.unified_memory_gb = 128.0
+    profile.unified_bandwidth_gb_s = 273.0
+
+    cfg = AutoConfig().calculate(profile, get_adapter("glm-5.2"))
+    assert cfg.tier_mode == "unified"
+    assert cfg.backend == "unified"
+    assert cfg.gpu_strategy == "unified"
+    assert cfg.ram_expert_count == 0        # same physical memory
+    assert cfg.unified_pool_gb == 128.0
+    assert cfg.vram_expert_count > 0
+    total = (cfg.vram_expert_count + cfg.ram_expert_count
+             + cfg.ssd_expert_count)
+    assert total == get_adapter("glm-5.2").total_expert_count
+
+
+def test_dgx_spark_dual_holds_more_experts():
+    """256GB must plan more resident experts than 128GB."""
+    adapter = get_adapter("glm-5.2")
+    single = _fake_profile([_gpu(vram_gb=128)])
+    single.accelerator = "unified"
+    single.unified_memory_gb = 128.0
+    single.unified_bandwidth_gb_s = 273.0
+    dual = _fake_profile([_gpu(vram_gb=128)])
+    dual.accelerator = "unified"
+    dual.unified_memory_gb = 256.0
+    dual.unified_bandwidth_gb_s = 273.0
+
+    a = AutoConfig().calculate(single, adapter)
+    b = AutoConfig().calculate(dual, adapter)
+    assert b.vram_expert_count > a.vram_expert_count
+    assert b.ssd_expert_count < a.ssd_expert_count
+
+
+def test_detect_amd_gpu_returns_none_when_rocm_smi_missing(monkeypatch):
+    from wisp.system import profiler as prof
+
+    def boom(cmd, timeout=5.0):
+        raise FileNotFoundError("rocm-smi")
+    monkeypatch.setattr(prof, "_run",
+                        lambda *a, **k: "")     # _run swallows OSError
+    assert prof.detect_amd_gpu() is None
+
+
+def test_detect_amd_gpu_structure(monkeypatch):
+    from wisp.system import profiler as prof
+    monkeypatch.setattr(prof, "_run", lambda cmd, timeout=5.0:
+                        "GPU[0] : Card Series: Radeon AI PRO R9700"
+                        if "showproductname" in " ".join(cmd)
+                        else "ROCm version: 7.0.1")
+    amd = prof.detect_amd_gpu()
+    assert amd is not None
+    assert amd["type"] == "amd_r9700"
+    assert amd["vram_gb"] == 32
+    assert amd["bandwidth_gb_s"] == 640
+    assert amd["gfx_target"] == "gfx1201"
+    assert amd["count"] == 1
+    # Honest about what detection actually buys
+    assert amd["compute_supported"] is False
+
+
+def test_amd_multi_gpu_pools_vram(monkeypatch):
+    from wisp.system import profiler as prof
+    monkeypatch.setattr(prof, "_run", lambda cmd, timeout=5.0:
+                        ("GPU[0] : Card Series: Radeon AI PRO R9700" + chr(10) +
+                         "GPU[1] : Card Series: Radeon AI PRO R9700")
+                        if "showproductname" in " ".join(cmd) else "")
+    amd = prof.detect_amd_gpu()
+    assert amd["count"] == 2
+    assert amd["vram_gb"] * amd["count"] == 64
+
+
+def test_rocm_profile_tags_backend():
+    profile = _fake_profile([_gpu(vram_gb=32)])
+    profile.accelerator = "rocm"
+    profile.amd_gpu = {"gfx_target": "gfx1201", "count": 1,
+                       "vram_gb": 32, "bandwidth_gb_s": 640}
+    cfg = AutoConfig().calculate(profile, get_adapter("mixtral-8x7b"))
+    assert cfg.backend == "rocm"
+    assert cfg.vendor == "amd"
+    assert cfg.gfx_target == "gfx1201"
+
+
+def test_default_profile_is_plain_cuda():
+    """Adding platforms must not disturb the ordinary NVIDIA path."""
+    cfg = AutoConfig().calculate(_fake_profile([_gpu()]),
+                                 get_adapter("mixtral-8x7b"))
+    assert cfg.tier_mode == "3tier"
+    assert cfg.backend == "cuda"
+    assert cfg.vendor == "nvidia"
+
+
 def test_gpu_strategy_selection():
     assert pick_gpu_strategy([]).mode == "cpu_only"
     assert pick_gpu_strategy([_gpu()]).mode == "single"

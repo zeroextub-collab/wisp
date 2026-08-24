@@ -45,6 +45,14 @@ class TierConfig:
     estimated_warm_toks: float
     estimated_hot_toks:  float
     estimated_mtp_toks:  float
+    # Platform shape. "3tier" is the classic VRAM/RAM/SSD split;
+    # "unified" is DGX Spark, where VRAM and RAM are one pool.
+    tier_mode:           str = "3tier"
+    backend:             str = "cuda"
+    unified_pool_gb:     float = 0.0
+    bandwidth_gb_s:      float = 0.0
+    vendor:              str = "nvidia"
+    gfx_target:          str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -99,6 +107,63 @@ def select_drafter_config(free_vram_bytes: int, drafter_id: str,
 
 class AutoConfig:
 
+    def _unified_config(self, profile: SystemProfile,
+                        model) -> TierConfig:
+        """Tier plan for a coherent-memory machine (DGX Spark)."""
+        es = model.expert_size_bytes
+        pool_bytes = int(getattr(profile, "unified_memory_gb", 0) * 1e9)
+        dense = model.dense_layer_size_bytes
+        # One OS reserve, not the separate VRAM buffer + RAM buffer:
+        # there is only one pool to starve.
+        reserve = max(8 * 1024**3, int(pool_bytes * 0.10))
+        usable = max(0, pool_bytes - dense - reserve)
+        pooled_experts = min(usable // es, model.total_expert_count)
+        ssd_experts = max(0, model.total_expert_count - pooled_experts)
+
+        bytes_per_token = es * model.top_k_routing * model.num_layers
+        nvme = max(profile.nvme_speed_bytes_per_sec, 1)
+        cold_toks = nvme / bytes_per_token
+        hit_rate = min(0.98, pooled_experts / max(model.total_expert_count, 1))
+        # Everything resident is served at unified-memory bandwidth —
+        # no PCIe hop — so warm and hot converge much sooner than on a
+        # discrete card.
+        pool_toks = (getattr(profile, "unified_bandwidth_gb_s", 0) * 1e9
+                     / bytes_per_token)
+        warm_toks = hit_rate * pool_toks + (1 - hit_rate) * cold_toks
+        hot_toks = warm_toks * 1.15
+        acc = model.default_acceptance_rate
+
+        drafter_cfg = select_drafter_config(
+            free_vram_bytes=usable,
+            drafter_id=model.drafter_hf_id,
+            drafter_type=model.get_drafter_config()["type"])
+
+        return TierConfig(
+            vram_expert_count   = int(pooled_experts),
+            ram_expert_count    = 0,       # same physical memory
+            ssd_expert_count    = int(ssd_experts),
+            gpu_strategy        = "unified",
+            primary_gpu         = 0,
+            secondary_gpu       = None,
+            drafter_id          = drafter_cfg["id"],
+            drafter_location    = drafter_cfg["location"],
+            drafter_dtype       = drafter_cfg["dtype"],
+            expected_acceptance = drafter_cfg["acceptance"],
+            omp_thread_count    = profile.cpu_threads,
+            estimated_cold_toks = round(cold_toks, 2),
+            estimated_warm_toks = round(warm_toks, 2),
+            estimated_hot_toks  = round(hot_toks, 2),
+            estimated_mtp_toks  = round(
+                hot_toks * (1.0 + acc * float(model.mtp_k)), 2),
+            tier_mode           = "unified",
+            backend             = "unified",
+            unified_pool_gb     = float(
+                getattr(profile, "unified_memory_gb", 0)),
+            bandwidth_gb_s      = float(
+                getattr(profile, "unified_bandwidth_gb_s", 0)),
+            vendor              = "nvidia",
+        )
+
     def calculate(self, profile: SystemProfile,
                   model: ModelAdapter) -> TierConfig:
         es    = model.expert_size_bytes
@@ -111,6 +176,15 @@ class AutoConfig:
         # growth, scratch) + 1.5GB when the monitor is detected on the
         # GPU (0 when it's on the iGPU — full VRAM for inference).
         dense = model.dense_layer_size_bytes
+
+        # ---- DGX Spark: unified memory ------------------------------- #
+        # CPU and GPU share one coherent pool, so the VRAM/RAM boundary
+        # WISP normally plans around does not physically exist. Two tiers
+        # remain: unified pool -> NVMe. There is no RAM->VRAM copy to
+        # hide, and no desktop compositor competing for the card.
+        if getattr(profile, "accelerator", "cuda") == "unified":
+            return self._unified_config(profile, model)
+
         BUFFER = (C.VRAM_SAFETY_BUFFER
                   + getattr(profile, "display_reserved_bytes", 0))
 
@@ -201,4 +275,15 @@ class AutoConfig:
             estimated_warm_toks = round(warm_toks, 2),
             estimated_hot_toks  = round(hot_toks, 2),
             estimated_mtp_toks  = round(mtp_effective, 2),
+            tier_mode           = "3tier",
+            backend             = ("rocm"
+                                   if getattr(profile, "accelerator", "")
+                                   == "rocm" else "cuda"),
+            vendor              = ("amd"
+                                   if getattr(profile, "amd_gpu", None)
+                                   else "nvidia"),
+            gfx_target          = ((profile.amd_gpu or {}).get(
+                                       "gfx_target", "")
+                                   if getattr(profile, "amd_gpu", None)
+                                   else ""),
         )
