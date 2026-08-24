@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"D:/WISP/build-cuda/cmake_install.cmake",
-		"D:/WISP/build-cuda/csrc/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

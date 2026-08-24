@@ -1,6 +1,7 @@
 # Build artifacts (root-anchored: never match source dirs of the same
 # name nested inside the package)
 /build-ninja/
+/build-cuda/
 /build/
 /dist/
 *.egg-info/
