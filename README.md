@@ -297,7 +297,7 @@ after the whole completion. Prompts are rendered with each family's own
 chat template. Requests are serialized: one engine, one KV cache, so
 concurrent decoding would interleave two conversations.
 
-Install the extra: `pip install 'wisp-engine[server]'`
+Install the extra: `pip install -e '.[server]'`
 
 ### Stability Guarantees
 
@@ -317,7 +317,7 @@ Install the extra: `pip install 'wisp-engine[server]'`
 API server running locally.
 
 ```bash
-pip install 'wisp-engine[gui]'
+pip install -e '.[gui]'
 wisp-gui
 ```
 
@@ -385,16 +385,25 @@ where the architecture truly sings.
 ## Quick Start
 
 ```bash
-pip install wisp-engine
+git clone https://github.com/zeroextub-collab/wisp
+cd wisp
+pip install -e .            # builds the C + CUDA engine (see Installation)
+wisp doctor                 # confirm the toolchain found everything
+
 wisp convert --model glm-5.2 --output ./models/
 wisp chat --model ./models/glm-5.2/
 ```
 
 ```bash
 # Desktop GUI
-pip install 'wisp-engine[gui]'
+pip install -e '.[gui]'
 wisp-gui
 ```
+
+> **Not on PyPI yet.** WISP builds a CUDA extension against your local
+> toolchain, so it installs from source today — `pip install wisp-engine`
+> will not work. (Note also that the name `wisp` on PyPI belongs to an
+> unrelated project.) Prebuilt wheels are tracked in the roadmap.
 
 ---
 
@@ -477,7 +486,7 @@ wisp upload --model ./models/glm-5.2/ --repo you/glm-5.2-wisp
 ### GUI
 
 ```bash
-pip install 'wisp-engine[gui]'
+pip install -e '.[gui]'
 wisp-gui
 ```
 
@@ -670,6 +679,8 @@ changes.
 - GLM-5.3 day-0 support (adapter stubbed, 24-48hr turnaround)
 - Full ROCm compute kernels (HIP port — AMD R9700 full speed)
 - Terminal UI dashboard
+- Prebuilt wheels on PyPI, so `pip install wisp-engine` works without a
+  local CUDA toolchain
 - Warm/hot benchmark numbers from the community
 
 ### v3.0 — Community Driven
